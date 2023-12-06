@@ -3,6 +3,7 @@
 
 use itertools::Itertools;
 use std::collections::HashMap;
+use get_size::GetSize;
 
 use crate::{protos, utils};
 
@@ -17,6 +18,7 @@ const ALL_OFFSET: i16 = TILE_WIDTH_OFFSET + BITMAP_WIDTH_OFFSET;
 
 // we have 512*512 tiles, 128*128 blocks and a single block contains
 // a 64*64 bitmap.
+#[derive(GetSize)]
 pub struct JourneyBitmap {
     pub tiles: HashMap<(u16, u16), Tile>,
 }
@@ -159,6 +161,8 @@ impl JourneyBitmap {
 }
 
 // TODO: maybe we don't need store (x,y) inside a tile/block.
+
+#[derive(GetSize)]
 pub struct Tile {
     x: u16,
     y: u16,
@@ -255,6 +259,8 @@ impl Tile {
     }
 }
 
+
+#[derive(GetSize)]
 pub struct Block {
     x: u8,
     y: u8,

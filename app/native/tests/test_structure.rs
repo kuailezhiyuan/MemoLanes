@@ -1,3 +1,4 @@
+use get_size::GetSize;
 use native::journey_bitmap::{self, Block, JourneyBitmap, Tile};
 use protobuf::Message;
 use rand::Rng;
@@ -9,7 +10,6 @@ const BLOCK_RATE: f64 = 0.02;
 const BITMAP_RATE: f64 = 0.4;
 const TOTAL_RATE: f64 = TILE_RATE * BLOCK_RATE * BITMAP_RATE;
 
-// 生成 20%填充block
 fn generate_block(x: u8, y: u8) -> Block {
     const SIZE: usize = 512;
     let mut rng = rand::thread_rng();
@@ -61,9 +61,13 @@ fn generate_journey_bitmap() -> JourneyBitmap {
     journey_bitmap
 }
 
-// cargo test test1 --release -- --nocapture
+fn print_size_human(name: &str, size_in_bytes: usize) {
+    println!("{}: {:.2} MB", name, size_in_bytes as f64 / 1024. / 1024.)
+}
+
+// cargo test test_structure --release -- --nocapture
 #[test]
-fn test1() {
+fn test_structure() {
     println!(
         "tile_rate: {:.1}%, block_rate: {:.1}%, bitmap_rate: {:.1}%",
         TILE_RATE * 100.,
@@ -74,9 +78,31 @@ fn test1() {
 
     let journey_bitmap = generate_journey_bitmap();
 
+    print_size_human("in memory size", journey_bitmap.get_heap_size());
+
     let proto = journey_bitmap.to_proto();
-    println!("proto占用{}bytes", &proto.compute_size());
-    let buf = &proto.write_to_bytes().unwrap();
-    let buf = zstd::encode_all(buf.as_slice(), 3);
-    println!("压缩后占用{}bytes", &buf.unwrap().len());
+    {
+        let buf = proto.write_to_bytes().unwrap();
+        print_size_human("[whole] protobuf", buf.len());
+        let buf = zstd::encode_all(buf.as_slice(), 3).unwrap();
+        print_size_human("[whole] zstd", buf.len());
+    }
+
+    let mut total_tile_proto_size: usize = 0;
+    let mut total_tile_zstd_size: usize = 0;
+    for (tile) in &proto.tiles {
+        let buf = tile.write_to_bytes().unwrap();
+        total_tile_proto_size += buf.len();
+        let buf = zstd::encode_all(buf.as_slice(), 3).unwrap();
+        total_tile_zstd_size += buf.len();
+    }
+
+    print_size_human("[tile total] protobuf", total_tile_proto_size);
+    print_size_human("[tile total] zstd", total_tile_zstd_size);
+
+    print_size_human(
+        "[tile avg] protobuf",
+        total_tile_proto_size / proto.tiles.len(),
+    );
+    print_size_human("[tile avg] zstd", total_tile_zstd_size / proto.tiles.len());
 }
