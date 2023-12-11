@@ -5,9 +5,9 @@ use rand::Rng;
 
 const TILE_WIDTH: i32 = 512;
 const BLOCK_WIDTH: i32 = 128;
-const TILE_RATE: f64 = 0.04;
-const BLOCK_RATE: f64 = 0.02;
-const BITMAP_RATE: f64 = 0.4;
+const TILE_RATE: f64 = 0.06;
+const BLOCK_RATE: f64 = 0.04;
+const BITMAP_RATE: f64 = 0.2;
 const TOTAL_RATE: f64 = TILE_RATE * BLOCK_RATE * BITMAP_RATE;
 
 fn generate_block(x: u8, y: u8) -> Block {
