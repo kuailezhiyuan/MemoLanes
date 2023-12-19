@@ -1,11 +1,10 @@
-use itertools::Itertools;
 use std::{
     collections::HashMap,
     ops::{BitAnd, BitOr, Not},
 };
 use get_size::GetSize;
 
-use crate::{protos, utils};
+use crate::utils;
 
 pub const TILE_WIDTH_OFFSET: i16 = 7;
 const MAP_WIDTH_OFFSET: i16 = 9;
@@ -28,42 +27,6 @@ impl JourneyBitmap {
         Self {
             tiles: HashMap::new(),
         }
-    }
-
-    pub fn to_proto(&self) -> protos::journey::data::Bitmap {
-        let mut proto = protos::journey::data::Bitmap::new();
-        for (tile_coord, tile) in self.tiles.iter().sorted_by_key(|x| x.0) {
-            let mut tile_proto = protos::journey::data::Tile::new();
-            tile_proto.x = tile_coord.0 as u32;
-            tile_proto.y = tile_coord.1 as u32;
-            for (block_coord, block) in tile.blocks.iter().sorted_by_key(|x| x.0) {
-                let mut block_proto = protos::journey::data::Block::new();
-                block_proto.x = block_coord.0 as u32;
-                block_proto.y = block_coord.1 as u32;
-                block_proto.data = block.data.to_vec();
-                tile_proto.blocks.push(block_proto);
-            }
-            proto.tiles.push(tile_proto);
-        }
-        proto
-    }
-
-    pub fn of_proto(proto: protos::journey::data::Bitmap) -> Self {
-        // TODO: reduce the amount of copy and allocation?
-        let mut t = JourneyBitmap::new();
-        for tile_proto in proto.tiles {
-            let mut tile = Tile::new(tile_proto.x as u16, tile_proto.y as u16);
-            for block_proto in tile_proto.blocks {
-                let block = Block::new_with_data(
-                    block_proto.x as u8,
-                    block_proto.y as u8,
-                    block_proto.data.try_into().unwrap(),
-                );
-                tile.blocks.insert((block.x, block.y), block);
-            }
-            t.tiles.insert((tile.x, tile.y), tile);
-        }
-        t
     }
 
     // NOTE: `add_line` is cherry picked from: https://github.com/tavimori/fogcore/blob/d0888508e25652164742db8e7d879e651b6607d7/src/fogmaps.rs
@@ -113,7 +76,7 @@ impl JourneyBitmap {
                 let tile = self
                     .tiles
                     .entry(((tile_x % MAP_WIDTH) as u16, tile_y as u16))
-                    .or_insert(Tile::new((tile_x % MAP_WIDTH) as u16, tile_y as u16));
+                    .or_insert(Tile::new());
                 (x, y, px) = tile.add_line(
                     x - (tile_x << ALL_OFFSET),
                     y - (tile_y << ALL_OFFSET),
@@ -142,7 +105,7 @@ impl JourneyBitmap {
                 let tile = self
                     .tiles
                     .entry(((tile_x % MAP_WIDTH) as u16, tile_y as u16))
-                    .or_insert(Tile::new((tile_x % MAP_WIDTH) as u16, tile_y as u16));
+                    .or_insert(Tile::new());
                 (x, y, py) = tile.add_line(
                     x - (tile_x << ALL_OFFSET),
                     y - (tile_y << ALL_OFFSET),
@@ -230,16 +193,12 @@ impl JourneyBitmap {
 // TODO: maybe we don't need store (x,y) inside a tile/block.
 #[derive(PartialEq, Eq, Debug,GetSize)]
 pub struct Tile {
-    x: u16,
-    y: u16,
     pub blocks: HashMap<(u8, u8), Block>,
 }
 
 impl Tile {
-    pub fn new(x: u16, y: u16) -> Self {
+    pub fn new() -> Self {
         Self {
-            x,
-            y,
             blocks: HashMap::new(),
         }
     }
@@ -274,7 +233,7 @@ impl Tile {
                 let block = self
                     .blocks
                     .entry((block_x as u8, block_y as u8))
-                    .or_insert(Block::new(block_x as u8, block_y as u8));
+                    .or_insert(Block::new());
 
                 (x, y, p) = block.add_line(
                     x - (block_x << BITMAP_WIDTH_OFFSET),
@@ -305,7 +264,7 @@ impl Tile {
                 let block = self
                     .blocks
                     .entry((block_x as u8, block_y as u8))
-                    .or_insert(Block::new(block_x as u8, block_y as u8));
+                    .or_insert(Block::new());
                 (x, y, p) = block.add_line(
                     x - (block_x << BITMAP_WIDTH_OFFSET),
                     y - (block_y << BITMAP_WIDTH_OFFSET),
@@ -327,22 +286,18 @@ impl Tile {
 
 #[derive(PartialEq, Eq, Debug, GetSize)]
 pub struct Block {
-    x: u8,
-    y: u8,
     data: [u8; BITMAP_SIZE],
 }
 
 impl Block {
-    pub fn new(x: u8, y: u8) -> Self {
+    pub fn new() -> Self {
         Self {
-            x,
-            y,
             data: [0; BITMAP_SIZE],
         }
     }
 
-    pub fn new_with_data(x: u8, y: u8, data: [u8; BITMAP_SIZE]) -> Self {
-        Self { x, y, data }
+    pub fn new_with_data(data: [u8; BITMAP_SIZE]) -> Self {
+        Self { data }
     }
 
     fn is_empty(&self) -> bool {
