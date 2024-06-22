@@ -28,10 +28,9 @@ jobs:
         with:
           channel: 'stable'
           cache: true
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          override: true
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
