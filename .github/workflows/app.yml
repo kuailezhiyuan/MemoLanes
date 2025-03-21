@@ -53,7 +53,7 @@ jobs:
 
       - name: Rust Code Check
         working-directory: app
-        run: just check
+        run: just rust-check
       # ======== END CHECK CODE ========
 
       # ======== START WASM MODULE ========
