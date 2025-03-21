@@ -27,9 +27,7 @@ jobs:
         with:
           just-version: 1.40.0
       - name: Get flutter_rust_bridge_codegen version
-        run: |
-          frb_version=$(awk '/flutter_rust_bridge:/ { print $2 }' pubspec.yaml)
-          echo "frb_version=$frb_version" >> $GITHUB_ENV
+        run: just get-frb-version
       - uses: actions/checkout@v3
       - uses: subosito/flutter-action@v2
         with:
