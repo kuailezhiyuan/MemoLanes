@@ -47,13 +47,13 @@ jobs:
         run: flutter pub get
 
       # ======== START CHECK CODE ========
+      - name: Get Rust Dependencies
+        working-directory: app/rust
+        run: cargo fetch
+
       - name: Flutter and Rust Code Check
         working-directory: app
         run: just check
-
-      - name: Flutter and Rust Code Test
-        working-directory: app
-        run: just test
       # ======== END CHECK CODE ========
 
       # ======== START WASM MODULE ========
@@ -89,11 +89,10 @@ jobs:
         working-directory: app/journey_kernel
         run: cargo test -- --nocapture
       # ======== END WASM MODULE ========
-
-      - name: Get Rust Dependencies
-        working-directory: app/rust
-        run: cargo fetch
-
       - name: FRB Codegen
         working-directory: app
         run: flutter_rust_bridge_codegen generate
+
+      - name: Flutter and Rust Code Test
+        working-directory: app
+        run: just test
