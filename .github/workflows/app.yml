@@ -29,8 +29,9 @@ jobs:
       - name: Get flutter_rust_bridge_codegen version
         working-directory: app
         run: |
-          frb-version=$(bash -c 'just get-frb-version')
-          echo "frb-version=$frb-version" >> $GITHUB_ENV
+          frb_version=$(just get-frb-version)
+          echo "frb_version=$frb_version" >> $GITHUB_ENV
+        shell: /bin/bash -e {0}
       - uses: actions/checkout@v3
       - uses: subosito/flutter-action@v2
         with:
