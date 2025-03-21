@@ -23,6 +23,12 @@ jobs:
 
     steps:
       # Setup
+      - uses: extractions/setup-just@v2
+      - name: Get flutter_rust_bridge_codegen version
+        id: get_version
+        run: |
+          frb-version=$(just get-frb-version)
+          echo "frb-version=$frb-version" >> $GITHUB_ENV
       - uses: actions/checkout@v3
       - uses: subosito/flutter-action@v2
         with:
@@ -38,7 +44,7 @@ jobs:
           workspaces: "app/rust/"
       - uses: cargo-bins/cargo-binstall@main
       - name: Install flutter_rust_bridge_codegen
-        run: cargo binstall -y --force --no-track 'cargo-expand' && cargo binstall -y --force --no-track 'flutter_rust_bridge_codegen@2.8.0'
+        run: cargo binstall -y --force --no-track 'cargo-expand' && cargo binstall -y --force --no-track 'flutter_rust_bridge_codegen@$frb-version"
 
       - name: Get Flutter Dependencies
         run: flutter pub get
