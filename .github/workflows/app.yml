@@ -24,6 +24,7 @@ jobs:
     steps:
       # Setup
       - uses: actions/checkout@v3
+      - uses: extractions/setup-just@v2
       - uses: subosito/flutter-action@v2
         with:
           channel: "stable"
@@ -36,15 +37,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "app/rust/"
-      - uses: extractions/setup-just@v2
       - name: Get flutter_rust_bridge_codegen version
         run: echo "frb_version=$(just get-frb-version)" >> $GITHUB_ENV
       - uses: cargo-bins/cargo-binstall@main
       - name: Install flutter_rust_bridge_codegen
         run: cargo binstall -y --force --no-track "cargo-expand" && cargo binstall -y --force --no-track "flutter_rust_bridge_codegen@$frb_version"
-
-      - name: Get Flutter Dependencies
-        run: flutter pub get
 
       # ======== START CHECK CODE ========
       - name: Get Rust Dependencies
@@ -75,20 +72,12 @@ jobs:
         
       - name: Cargo Check (wasm)
         working-directory: app/journey_kernel
-        run: cargo check
+        run: just journey-kernel-check
 
-      - name: Check Rust format (wasm)
-        working-directory: app/journey_kernel
-        run: cargo fmt --all -- --check
-
-      - name: Rust code analysis (wasm)
-        working-directory: app/journey_kernel
-        run: cargo clippy -- -D warnings
-
-      - name: Run Rust tests (wasm)
-        working-directory: app/journey_kernel
-        run: cargo test -- --nocapture
       # ======== END WASM MODULE ========
+      - name: Get Flutter Dependencies
+        run: flutter pub get
+
       - name: FRB Codegen
         working-directory: app
         run: flutter_rust_bridge_codegen generate
