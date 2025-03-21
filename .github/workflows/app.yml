@@ -46,6 +46,14 @@ jobs:
       - name: Get Flutter Dependencies
         run: flutter pub get
 
+      # ======== START CHECK CODE ========
+      - name: Flutter and Rust Code Check
+        run: just check
+
+      - name: Flutter and Rust Code Check
+        run: just test
+      # ======== END CHECK CODE ========
+
       # ======== START WASM MODULE ========
       - uses: Swatinem/rust-cache@v2
         with:
@@ -87,20 +95,3 @@ jobs:
       - name: FRB Codegen
         working-directory: app
         run: flutter_rust_bridge_codegen generate
-
-      # Rust
-      - name: Cargo Check
-        working-directory: app/rust
-        run: cargo check
-      - name: Check Rust format
-        working-directory: app/rust
-        run: cargo fmt --all -- --check
-      - name: Rust code analysis
-        working-directory: app/rust
-        run: cargo clippy -- -D warnings
-      - name: Run Rust tests
-        working-directory: app/rust
-        run: cargo test -- --nocapture
-
-      - name: Flutter Analyze
-        run: flutter analyze --no-fatal-infos
