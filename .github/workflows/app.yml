@@ -41,7 +41,7 @@ jobs:
         run: echo "frb-version=$(just get-frb-version)" >> $GITHUB_ENV
       - uses: cargo-bins/cargo-binstall@main
       - name: Install flutter_rust_bridge_codegen
-        run: cargo binstall -y --force --no-track 'cargo-expand' && cargo binstall -y --force --no-track 'flutter_rust_bridge_codegen@$frb-version"
+        run: cargo binstall -y --force --no-track 'cargo-expand' && cargo binstall -y --force --no-track "flutter_rust_bridge_codegen@$frb-version"
 
       - name: Get Flutter Dependencies
         run: flutter pub get
