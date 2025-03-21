@@ -48,9 +48,11 @@ jobs:
 
       # ======== START CHECK CODE ========
       - name: Flutter and Rust Code Check
+        working-directory: app
         run: just check
 
-      - name: Flutter and Rust Code Check
+      - name: Flutter and Rust Code Test
+        working-directory: app
         run: just test
       # ======== END CHECK CODE ========
 
