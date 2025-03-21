@@ -51,7 +51,7 @@ jobs:
         working-directory: app/rust
         run: cargo fetch
 
-      - name: Flutter and Rust Code Check
+      - name: Rust Code Check
         working-directory: app
         run: just check
       # ======== END CHECK CODE ========
@@ -93,6 +93,10 @@ jobs:
         working-directory: app
         run: flutter_rust_bridge_codegen generate
 
+      - name: Flutter Code Check
+        working-directory: app
+        run: just flutter-check
+        
       - name: Flutter and Rust Code Test
         working-directory: app
         run: just test
