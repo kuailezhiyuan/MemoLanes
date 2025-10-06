@@ -1,5 +1,5 @@
+import 'dart:async';
 import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:json_annotation/json_annotation.dart';
 import 'package:memolanes/common/gps_manager.dart';
@@ -13,6 +13,7 @@ import 'package:memolanes/common/mmkv_util.dart';
 import 'package:memolanes/src/rust/api/api.dart' as api;
 import 'package:pointer_interceptor/pointer_interceptor.dart';
 import 'package:provider/provider.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 
 part 'map.g.dart';
 
@@ -44,6 +45,9 @@ class MapBody extends StatefulWidget {
 class MapBodyState extends State<MapBody> with WidgetsBindingObserver {
   final _mapRendererProxy = api.getMapRendererProxyForMainMap();
   MapView? _roughMapView;
+
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
+  List<ConnectivityResult>? _lastResults;
 
   TrackingMode _currentTrackingMode = TrackingMode.off;
   api.LayerKind _currentLayer = api.getCurrentMapLayerKind();
@@ -77,13 +81,47 @@ class MapBodyState extends State<MapBody> with WidgetsBindingObserver {
     super.initState();
     _loadMapState();
     WidgetsBinding.instance.addObserver(this);
+
+    _connectivitySub = Connectivity()
+        .onConnectivityChanged
+        .listen((List<ConnectivityResult> results) {
+      _onConnectivityChanged(results);
+    });
+
+    _checkInitialStatus();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _saveMapState();
+    _connectivitySub?.cancel();
     super.dispose();
+  }
+
+  Future<void> _checkInitialStatus() async {
+    final results = await Connectivity().checkConnectivity();
+    _lastResults = results;
+    if (!_isDisconnected(results)) {
+      _loadMapState();
+    }
+  }
+
+  void _onConnectivityChanged(List<ConnectivityResult> results) {
+    final lastDisconnected = _isDisconnected(_lastResults);
+    final nowConnected = !_isDisconnected(results);
+
+    if (lastDisconnected && nowConnected) {
+      _loadMapState();
+    }
+
+    _lastResults = results;
+  }
+
+  bool _isDisconnected(List<ConnectivityResult>? results) {
+    if (results == null || results.isEmpty) return true;
+    // 如果都等于 none，则说明没网
+    return results.every((r) => r == ConnectivityResult.none);
   }
 
   @override
