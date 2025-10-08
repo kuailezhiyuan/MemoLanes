@@ -45,6 +45,7 @@ class MapBody extends StatefulWidget {
 class MapBodyState extends State<MapBody> with WidgetsBindingObserver {
   final _mapRendererProxy = api.getMapRendererProxyForMainMap();
   MapView? _roughMapView;
+  Key _mapKey = const ValueKey("mainMap");
 
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
   List<ConnectivityResult>? _lastResults;
@@ -112,7 +113,9 @@ class MapBodyState extends State<MapBody> with WidgetsBindingObserver {
     final nowConnected = !_isDisconnected(results);
 
     if (lastDisconnected && nowConnected) {
-      _loadMapState();
+      setState(() {
+        _mapKey = ValueKey("mainMap_${DateTime.now().millisecondsSinceEpoch}");
+      });
     }
 
     _lastResults = results;
@@ -120,7 +123,6 @@ class MapBodyState extends State<MapBody> with WidgetsBindingObserver {
 
   bool _isDisconnected(List<ConnectivityResult>? results) {
     if (results == null || results.isEmpty) return true;
-    // 如果都等于 none，则说明没网
     return results.every((r) => r == ConnectivityResult.none);
   }
 
@@ -192,7 +194,7 @@ class MapBodyState extends State<MapBody> with WidgetsBindingObserver {
       return Stack(
         children: [
           BaseMapWebview(
-            key: const ValueKey("mainMap"),
+            key: _mapKey,
             mapRendererProxy: _mapRendererProxy,
             initialMapView: _roughMapView,
             trackingMode: _currentTrackingMode,
