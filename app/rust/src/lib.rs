@@ -9,17 +9,21 @@ extern crate lazy_static;
 
 #[rustfmt::skip]
 mod frb_generated; /* AUTO INJECTED BY flutter_rust_bridge. This line may not be accurate, and you can change it according to your needs. */
+#[rustfmt::skip]
+pub mod build_info;
 
 pub mod api;
 pub mod archive;
-mod build_info;
 pub mod cache_db;
 pub mod export_data;
+pub mod flight_track_processor;
 pub mod gps_processor;
+pub mod gpx_file_utils;
 pub mod import_data;
 pub mod journey_area_utils;
 pub mod journey_bitmap;
 pub mod journey_data;
+pub mod journey_date_picker;
 pub mod journey_header;
 pub mod journey_vector;
 mod logs;

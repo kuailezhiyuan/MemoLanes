@@ -1,28 +1,34 @@
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
+use std::io::{BufReader, BufWriter};
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use auto_context::auto_context;
 use chrono::NaiveDate;
+use csv::Reader;
 use flutter_rust_bridge::frb;
 
-use crate::cache_db::LayerKind as InternalLayerKind;
+use super::import::JourneyInfo;
+use crate::cache_db::LayerKind;
 use crate::frb_generated::StreamSink;
 use crate::gps_processor::{GpsPreprocessor, ProcessResult};
-use crate::journey_bitmap::{JourneyBitmap, MAP_WIDTH_OFFSET, TILE_WIDTH, TILE_WIDTH_OFFSET};
+use crate::journey_bitmap::JourneyBitmap;
 use crate::journey_data::JourneyData;
 use crate::journey_header::{JourneyHeader, JourneyKind, JourneyType};
-use crate::renderer::map_server::MapRendererToken;
+use crate::logs;
+use crate::renderer::get_default_camera_option_from_journey_bitmap;
+use crate::renderer::internal_server::{Request, RequestResponse, TileRangeResponse};
 use crate::renderer::MapRenderer;
-use crate::renderer::MapServer;
-use crate::storage::Storage;
-use crate::{
-    archive, build_info, export_data, gps_processor, main_db, merged_journey_builder, storage,
-};
-use crate::{logs, utils};
-use serde::{Deserialize, Serialize};
+use crate::storage::{RawDataFile, Storage};
+use crate::{archive, build_info, export_data, gps_processor, main_db};
 
-use super::import::JourneyInfo;
+use crate::renderer::CameraOptionInternal;
 
+pub(crate) type CameraOption = CameraOptionInternal;
+
+use crate::export_data::raw_data_csv_to_gpx_file;
 use log::{error, info, warn};
 
 // TODO: we have way too many locking here and now it is hard to track.
@@ -31,11 +37,7 @@ use log::{error, info, warn};
 pub(super) struct MainState {
     pub storage: Storage,
     pub gps_preprocessor: Mutex<GpsPreprocessor>,
-    pub map_server: Mutex<MapServer>,
-    // TODO: we should reconsider the way we handle the main map
-    pub main_map_layer_kind: Arc<Mutex<InternalLayerKind>>,
-    pub main_map_renderer: Arc<Mutex<MapRenderer>>,
-    pub main_map_renderer_token: MapRendererToken,
+    main_map_state: Arc<Mutex<MainMapState>>,
 }
 
 static MAIN_STATE: OnceLock<MainState> = OnceLock::new();
@@ -50,51 +52,79 @@ pub fn short_commit_hash() -> String {
     build_info::SHORT_COMMIT_HASH.to_string()
 }
 
-pub fn init(temp_dir: String, doc_dir: String, support_dir: String, cache_dir: String) {
+#[auto_context]
+fn reload_main_map_bitmap(storage: &Storage, main_map_state: &mut MainMapState) -> Result<()> {
+    if main_map_state.dropped_for_power_saving {
+        return Ok(());
+    }
+
+    let layer_filter = main_map_state.layer_filter;
+
+    // TODO: merge layer filter with layer kind
+    let layer_kind = match (layer_filter.default_kind, layer_filter.flight_kind) {
+        (true, true) => Some(LayerKind::All),
+        (true, false) => Some(LayerKind::JourneyKind(JourneyKind::DefaultKind)),
+        (false, true) => Some(LayerKind::JourneyKind(JourneyKind::Flight)),
+        (false, false) => None,
+    };
+
+    let journey_bitmap = storage
+        .get_latest_bitmap_for_main_map_renderer(&layer_kind, layer_filter.current_journey)?;
+    main_map_state.map_renderer.replace(journey_bitmap);
+    Ok(())
+}
+
+pub fn init(temp_dir: String, doc_dir: String, support_dir: String, system_cache_dir: String) {
     let mut already_initialized = true;
     MAIN_STATE.get_or_init(|| {
         already_initialized = false;
 
-        // init logging
-        logs::init(&cache_dir).expect("Failed to initialize logging");
+        let (real_cache_dir, logs) = prepare_real_cache_dir(&support_dir, &system_cache_dir)
+            .expect("Failed to initialize cache dir");
 
-        let mut storage = Storage::init(temp_dir, doc_dir, support_dir, cache_dir);
+        // init logging
+        logs::init(&real_cache_dir).expect("Failed to initialize logging");
+
+        if let Some(logs) = logs {
+            for (level, message) in logs {
+                write_log(message, level);
+            }
+        }
+
+        let mut storage = Storage::init(temp_dir, doc_dir, support_dir, real_cache_dir);
         info!("initialized");
 
-        let mut map_server =
-            MapServer::create_and_start("localhost", None).expect("Failed to start map server");
-        info!("map server started");
+        let default_layer_filter = LayerFilter {
+            current_journey: true,
+            default_kind: true,
+            flight_kind: false,
+        };
 
-        let default_layer_kind = InternalLayerKind::JounreyKind(JourneyKind::DefaultKind);
-        let main_map_layer_kind = Arc::new(Mutex::new(default_layer_kind));
-        let main_map_layer_kind_copy = main_map_layer_kind.clone();
         // TODO: use an empty journey bitmap first, because loading could be slow (especially when we don't have cache).
-        // Ideally, we should support main map renderer being none. e.g. we free it when the user is not using the map.
-        let main_map_renderer = Arc::new(Mutex::new(MapRenderer::new(JourneyBitmap::new())));
-        let main_map_renderer_copy = main_map_renderer.clone();
+        // Ideally, we should support main map renderer being none, combine together with `dropped_for_power_saving`
+        // to be more type safe.
+        let main_map_state = Arc::new(Mutex::new(MainMapState {
+            map_renderer: MapRenderer::new(JourneyBitmap::new()),
+            dropped_for_power_saving: false,
+            layer_filter: default_layer_filter,
+        }));
+        let main_map_state_copy = main_map_state.clone();
         // TODO: redesign the callback to better handle locks and avoid deadlocks
         storage.set_finalized_journey_changed_callback(Box::new(move |storage| {
-            let mut map_renderer = main_map_renderer_copy.lock().unwrap();
-            let layer_kind = main_map_layer_kind_copy.lock().unwrap();
-            match storage.get_latest_bitmap_for_main_map_renderer(&layer_kind) {
+            let mut main_map_state = main_map_state_copy.lock().unwrap();
+            match reload_main_map_bitmap(storage, &mut main_map_state) {
+                Ok(()) => (),
                 Err(e) => {
                     error!("Failed to get latest bitmap for main map renderer: {e:?}");
                 }
-                Ok(journey_bitmap) => {
-                    map_renderer.replace(journey_bitmap);
-                }
             }
         }));
-        let main_map_renderer_token = map_server.register_map_renderer(main_map_renderer.clone());
         info!("main map renderer initialized");
 
         MainState {
             storage,
             gps_preprocessor: Mutex::new(GpsPreprocessor::new()),
-            map_server: Mutex::new(map_server),
-            main_map_layer_kind,
-            main_map_renderer,
-            main_map_renderer_token,
+            main_map_state,
         }
     });
     if already_initialized {
@@ -102,21 +132,117 @@ pub fn init(temp_dir: String, doc_dir: String, support_dir: String, cache_dir: S
     }
 }
 
-// TODO: this design is not ideal, we need this becuase the `init` above uses an empty one.
+// On iOS, we use `NSCachesDirectory` for storing cache file,
+// it won't be cleared by the system and also won't be included in icloud backup,
+// which is exactly what we want.
+// On Android, we don't use `getCacheDir()` but create our own folder under `getFilesDir()`.
+// The reason is that on Android,
+// the cache folder may be cleared even when the app is running,
+// which is troublesome for us. Also the app request the whole cache while running,
+// it will create the whole thing if missing so clearing the cache randomly doesn't provide much value.
+#[allow(clippy::type_complexity)]
+fn prepare_real_cache_dir(
+    support_dir: &str,
+    system_cache_dir: &str,
+) -> Result<(String, Option<Vec<(LogLevel, String)>>)> {
+    if std::env::consts::OS == "android" {
+        let final_path = Path::new(support_dir).join("cache");
+        // Migrate cache data
+        let logs = if !final_path.exists() {
+            let mut logs = Vec::new();
+            logs.push((
+                LogLevel::Info,
+                format!("Setting up real cache dir for Android at {final_path:?}"),
+            ));
+            // TODO this can be delete when most people have rolled pass this.
+            let old_dir = Path::new(system_cache_dir);
+            if old_dir.exists() {
+                logs.push((
+                    LogLevel::Info,
+                    format!("Old cache dir {old_dir:?} exists, move Data"),
+                ));
+
+                std::fs::create_dir_all(&final_path).map_err(|e| {
+                    logs.push((
+                        LogLevel::Error,
+                        format!("Failed to create final cache dir {final_path:?}: {e:?}"),
+                    ));
+                    e
+                })?;
+
+                let old_db = old_dir.join("cache.db");
+                let new_db = final_path.join("cache.db");
+
+                if old_db.exists() {
+                    logs.push((
+                        LogLevel::Info,
+                        format!("Found {old_db:?}, move to {new_db:?}"),
+                    ));
+
+                    match std::fs::rename(&old_db, &new_db) {
+                        Ok(()) => logs.push((
+                            LogLevel::Info,
+                            format!("Successfully moved cache.db to {new_db:?}"),
+                        )),
+                        Err(e) => {
+                            logs.push((LogLevel::Error, format!("Failed to move cache.db: {e:?}")))
+                        }
+                    }
+                }
+
+                let old_log = old_dir.join("logs");
+                let new_log = final_path.join("logs");
+
+                if old_log.exists() {
+                    logs.push((
+                        LogLevel::Info,
+                        format!("Found log directory {old_log:?}, move to {new_log:?}"),
+                    ));
+
+                    match std::fs::rename(&old_log, &new_log) {
+                        Ok(()) => logs.push((
+                            LogLevel::Info,
+                            format!("Successfully moved log directory to {new_log:?}"),
+                        )),
+                        Err(e) => logs.push((
+                            LogLevel::Error,
+                            format!("Failed to move log directory: {e:?}"),
+                        )),
+                    }
+                }
+            } else {
+                logs.push((
+                    LogLevel::Info,
+                    format!("Old cache dir {old_dir:?} does not exist, no migration needed"),
+                ));
+                std::fs::create_dir_all(&final_path)?;
+            }
+            Some(logs)
+        } else {
+            None
+        };
+        Ok((final_path.to_string_lossy().into_owned(), logs))
+    } else {
+        Ok((system_cache_dir.to_string(), None))
+    }
+}
+
+// TODO: this design is not ideal, we need this because the `init` above uses an empty one.
 pub fn init_main_map() -> Result<()> {
     let state = get();
-    let mut map_renderer = state.main_map_renderer.lock().unwrap();
-    let layer_kind = state.main_map_layer_kind.lock().unwrap();
-    let journey_bitmap = state
-        .storage
-        .get_latest_bitmap_for_main_map_renderer(&layer_kind)?;
-    map_renderer.replace(journey_bitmap);
-    Ok(())
+    let mut main_map_state = state.main_map_state.lock().unwrap();
+    reload_main_map_bitmap(&state.storage, &mut main_map_state)
 }
 
 pub fn subscribe_to_log_stream(sink: StreamSink<String>) -> Result<()> {
     let mut logger = logs::FLUTTER_LOGGER.lock().unwrap();
+    let old_sink = logger.take();
     *logger = Some(sink);
+    // NOTE: The following code is important for flutter hot restart. We need to
+    // release the `logger` lock before freeing the `old_sink`, otherwise
+    // there will be a deadlock.
+    drop(logger);
+    let _ = old_sink;
     Ok(())
 }
 
@@ -137,150 +263,162 @@ pub enum LogLevel {
 }
 
 #[frb(opaque)]
+pub struct OpaqueJourneyData {
+    data: Mutex<JourneyData>,
+}
+
+impl OpaqueJourneyData {
+    pub(super) fn new(journey_data: JourneyData) -> Self {
+        OpaqueJourneyData {
+            data: Mutex::new(journey_data),
+        }
+    }
+
+    pub(super) fn into_inner(self) -> JourneyData {
+        self.data.into_inner().unwrap()
+    }
+
+    pub(super) fn borrow_inner(&self) -> std::sync::MutexGuard<'_, JourneyData> {
+        self.data.lock().unwrap()
+    }
+}
+
+#[frb(opaque)]
 pub enum MapRendererProxy {
-    Token(MapRendererToken),
+    StaticRenderer(Mutex<MapRenderer>),
+    DynamicRenderer(Arc<Mutex<MapRenderer>>),
+    MainMapRenderer,
 }
 
 impl MapRendererProxy {
-    #[frb(sync)]
-    pub fn get_url(&self) -> String {
-        match self {
-            MapRendererProxy::Token(token) => token.url(),
-        }
+    pub fn handle_webview_requests(&mut self, request: String) -> Result<String> {
+        let request = Request::parse(&request)?;
+        let response = match self {
+            MapRendererProxy::StaticRenderer(map_renderer) => {
+                let map_renderer = map_renderer.get_mut().unwrap();
+                request.handle(map_renderer)
+            }
+            MapRendererProxy::DynamicRenderer(map_renderer) => {
+                let mut map_renderer = map_renderer.lock().unwrap();
+                request.handle(&mut map_renderer)
+            }
+            MapRendererProxy::MainMapRenderer => {
+                let mut main_map_state = get().main_map_state.lock().unwrap();
+                match main_map_state.dropped_for_power_saving {
+                    false => request.handle(&mut main_map_state.map_renderer),
+                    true =>
+                    // TODO: This is hacky. I think we should make the type better here for `main_map_state`.
+                    // Also have a dedicate value for this case in the response. Right now we reuse the case that
+                    // indicates nothing changed in the map.
+                    {
+                        let response_data = TileRangeResponse {
+                            status: 304,
+                            headers: HashMap::new(),
+                            body: Vec::new(),
+                        };
+                        RequestResponse {
+                            request_id: request.request_id.clone(),
+                            success: true,
+                            data: Some(serde_json::to_value(response_data)?),
+                            error: None,
+                        }
+                    }
+                }
+            }
+        };
+        serde_json::to_string(&response)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize response: {e}"))
     }
 }
 
 #[frb(sync)]
 pub fn get_map_renderer_proxy_for_main_map() -> MapRendererProxy {
-    let token = get().main_map_renderer_token.clone_temporary_token();
-
-    MapRendererProxy::Token(token)
+    MapRendererProxy::MainMapRenderer
 }
 
 // TODO: does this interface necessary?
 #[frb(sync)]
 pub fn get_empty_map_renderer_proxy() -> MapRendererProxy {
-    let state = get();
-
     let journey_bitmap = JourneyBitmap::new();
-
-    let mut server = state.map_server.lock().unwrap();
     let map_renderer = MapRenderer::new(journey_bitmap);
-    let token = server.register_map_renderer(Arc::new(Mutex::new(map_renderer)));
-    MapRendererProxy::Token(token)
+    MapRendererProxy::StaticRenderer(Mutex::new(map_renderer))
 }
 
+/// [journey_kinds]: empty = no layers; len 1 = that kind only; len 2 = both (pass None).
 pub fn get_map_renderer_proxy_for_journey_date_range(
     from_date_inclusive: NaiveDate,
     to_date_inclusive: NaiveDate,
+    journey_kinds: HashSet<JourneyKind>,
 ) -> Result<MapRendererProxy> {
     let state = get();
-    let journey_bitmap = state.storage.with_db_txn(|txn| {
-        merged_journey_builder::get_range(txn, from_date_inclusive, to_date_inclusive, None)
-    })?;
+    let get = |journey_kind| {
+        state
+            .storage
+            .get_range_bitmap(from_date_inclusive, to_date_inclusive, journey_kind)
+    };
+    let journey_bitmap = match (
+        journey_kinds.contains(&JourneyKind::DefaultKind),
+        journey_kinds.contains(&JourneyKind::Flight),
+    ) {
+        (false, false) => JourneyBitmap::new(),
+        (true, false) => get(Some(&JourneyKind::DefaultKind))?,
+        (false, true) => get(Some(&JourneyKind::Flight))?,
+        (true, true) => get(None)?,
+    };
 
-    let mut server = state.map_server.lock().unwrap();
     let map_renderer = MapRenderer::new(journey_bitmap);
-    let token = server.register_map_renderer(Arc::new(Mutex::new(map_renderer)));
-    Ok(MapRendererProxy::Token(token))
-}
-
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
-pub struct CameraOption {
-    pub zoom: f64,
-    pub lng: f64,
-    pub lat: f64,
-}
-
-// TODO: redesign this interface at a better position
-pub(crate) fn get_default_camera_option_from_journey_bitmap(
-    journey_bitmap: &JourneyBitmap,
-) -> Option<CameraOption> {
-    // TODO: Currently we use the coordinate of the top left of a random block (first one in the hashtbl),
-    // then just pick a hardcoded zoom level.
-    // A better version could be finding a bounding box (need to be careful with the antimeridian).
-    journey_bitmap
-        .tiles
-        .iter()
-        .next()
-        .and_then(|(tile_pos, tile)| {
-            // we shouldn't have empty tile or block
-            tile.iter().next().map(|(block_key, _)| {
-                let blockzoomed_x: i32 =
-                    TILE_WIDTH as i32 * tile_pos.0 as i32 + block_key.x() as i32;
-                let blockzoomed_y: i32 =
-                    TILE_WIDTH as i32 * tile_pos.1 as i32 + block_key.y() as i32;
-                let (lng, lat) = utils::tile_x_y_to_lng_lat(
-                    blockzoomed_x,
-                    blockzoomed_y,
-                    (TILE_WIDTH_OFFSET + MAP_WIDTH_OFFSET) as i32,
-                );
-                CameraOption {
-                    zoom: 12.0,
-                    lng,
-                    lat,
-                }
-            })
-        })
+    Ok(MapRendererProxy::DynamicRenderer(Arc::new(Mutex::new(
+        map_renderer,
+    ))))
 }
 
 fn get_map_renderer_proxy_for_journey_data_internal(
-    state: &'static MainState,
     journey_data: JourneyData,
 ) -> Result<(MapRendererProxy, Option<CameraOption>)> {
-    let journey_bitmap = match journey_data {
-        JourneyData::Bitmap(bitmap) => bitmap,
-        JourneyData::Vector(vector) => {
-            let mut bitmap = JourneyBitmap::new();
-            merged_journey_builder::add_journey_vector_to_journey_bitmap(&mut bitmap, &vector);
-            bitmap
-        }
-    };
+    let mut journey_bitmap = JourneyBitmap::new();
+    journey_data.merge_into(&mut journey_bitmap);
 
     let default_camera_option = get_default_camera_option_from_journey_bitmap(&journey_bitmap);
 
     let map_renderer = MapRenderer::new(journey_bitmap);
-    let mut server = state.map_server.lock().unwrap();
-    let token = server.register_map_renderer(Arc::new(Mutex::new(map_renderer)));
-    Ok((MapRendererProxy::Token(token), default_camera_option))
+    Ok((
+        MapRendererProxy::DynamicRenderer(Arc::new(Mutex::new(map_renderer))),
+        default_camera_option,
+    ))
 }
 
 pub fn get_map_renderer_proxy_for_journey(
     journey_id: &str,
 ) -> Result<(MapRendererProxy, Option<CameraOption>)> {
-    let state = get();
-    let journey_data = state
+    let journey_data = get()
         .storage
         .with_db_txn(|txn| txn.get_journey_data(journey_id))?;
-    get_map_renderer_proxy_for_journey_data_internal(state, journey_data)
+    get_map_renderer_proxy_for_journey_data_internal(journey_data)
 }
 
 pub fn get_map_renderer_proxy_for_journey_data(
-    journey_data: &JourneyData,
+    journey_data: &OpaqueJourneyData,
 ) -> Result<(MapRendererProxy, Option<CameraOption>)> {
-    let state = get();
     // TODO: the clone here is not ideal, we should redesign the interface,
     // maybe consider Arc.
-    get_map_renderer_proxy_for_journey_data_internal(state, journey_data.clone())
+    let journey_data = journey_data.borrow_inner().clone();
+    get_map_renderer_proxy_for_journey_data_internal(journey_data)
 }
 
-pub fn on_location_update(
-    mut raw_data_list: Vec<gps_processor::RawData>,
-    recevied_timestamp_ms: i64,
-) {
+// Return `true` if this update contains meaningful data.
+// Meaningful data means it is not ignored by the gps preprocessor.
+pub fn on_location_update(raw_data: gps_processor::RawData, received_timestamp_ms: i64) -> bool {
     let state = get();
-    // NOTE: On Android, we might recevied a batch of location updates that are out of order.
+    // NOTE: On Android, we might received a batch of location updates that are out of order.
     // Not very sure why yet.
 
     // we need handle a batch in one go so we hold the lock for the whole time
     let mut gps_preprocessor = state.gps_preprocessor.lock().unwrap();
-    let mut map_renderer = state.main_map_renderer.lock().unwrap();
+    let mut main_map_state = state.main_map_state.lock().unwrap();
 
-    raw_data_list.sort_by(|a, b| a.timestamp_ms.cmp(&b.timestamp_ms));
-    raw_data_list.into_iter().for_each(|raw_data| {
-        // TODO: more batching updates
-        let last_point = gps_preprocessor.last_kept_point();
-        let process_result = gps_preprocessor.preprocess(&raw_data);
+    let last_point = gps_preprocessor.last_kept_point();
+    let process_result = gps_preprocessor.preprocess(&raw_data);
+    if !main_map_state.dropped_for_power_saving && main_map_state.layer_filter.current_journey {
         let line_to_add = match process_result {
             ProcessResult::Ignore => None,
             ProcessResult::NewSegment => Some((&raw_data.point, &raw_data.point)),
@@ -292,24 +430,32 @@ pub fn on_location_update(
         match line_to_add {
             None => (),
             Some((start, end)) => {
-                map_renderer.update(|journey_bitmap, tile_changed| {
-                    journey_bitmap.add_line_with_change_callback(
-                        start.longitude,
-                        start.latitude,
-                        end.longitude,
-                        end.latitude,
-                        tile_changed,
-                    );
-                });
+                main_map_state.map_renderer.update(
+                    |journey_bitmap: &mut crate::journey_bitmap::JourneyBitmap, tile_changed| {
+                        journey_bitmap.add_line_with_change_callback(
+                            start.longitude,
+                            start.latitude,
+                            end.longitude,
+                            end.latitude,
+                            tile_changed,
+                        );
+                    },
+                );
             }
-        }
-        state
-            .storage
-            .record_gps_data(&raw_data, process_result, recevied_timestamp_ms);
-    });
+        };
+    };
+
+    state
+        .storage
+        .record_gps_data(&raw_data, process_result, received_timestamp_ms);
+
+    match process_result {
+        ProcessResult::Ignore => false,
+        ProcessResult::Append | ProcessResult::NewSegment => true,
+    }
 }
 
-pub fn list_all_raw_data() -> Vec<storage::RawDataFile> {
+pub fn list_all_raw_data() -> Result<Vec<RawDataFile>> {
     get().storage.list_all_raw_data()
 }
 
@@ -331,52 +477,41 @@ pub fn toggle_raw_data_mode(enable: bool) {
     get().storage.toggle_raw_data_mode(enable)
 }
 
-pub enum LayerKind {
-    All,
-    DefaultKind,
-    Flight,
+#[frb]
+#[derive(Eq, Clone, Copy, Debug, PartialEq)]
+pub struct LayerFilter {
+    #[frb(non_final)]
+    pub current_journey: bool,
+    #[frb(non_final)]
+    pub default_kind: bool,
+    #[frb(non_final)]
+    pub flight_kind: bool,
 }
 
-impl LayerKind {
-    fn to_internal(&self) -> InternalLayerKind {
-        match self {
-            LayerKind::All => InternalLayerKind::All,
-            LayerKind::DefaultKind => InternalLayerKind::JounreyKind(JourneyKind::DefaultKind),
-            LayerKind::Flight => InternalLayerKind::JounreyKind(JourneyKind::Flight),
-        }
-    }
-
-    fn of_internal(internal: &InternalLayerKind) -> LayerKind {
-        match internal {
-            InternalLayerKind::All => LayerKind::All,
-            InternalLayerKind::JounreyKind(kind) => match kind {
-                JourneyKind::DefaultKind => LayerKind::DefaultKind,
-                JourneyKind::Flight => LayerKind::Flight,
-            },
-        }
-    }
+#[frb(ignore)]
+pub struct MainMapState {
+    pub map_renderer: MapRenderer,
+    pub dropped_for_power_saving: bool,
+    pub layer_filter: LayerFilter,
 }
 
 #[frb(sync)]
-pub fn get_current_map_layer_kind() -> LayerKind {
-    LayerKind::of_internal(&get().main_map_layer_kind.lock().unwrap())
+pub fn get_current_main_map_layer_filter() -> LayerFilter {
+    get().main_map_state.lock().unwrap().layer_filter
 }
 
-pub fn set_main_map_layer_kind(layer_kind: LayerKind) -> Result<()> {
+pub fn set_main_map_layer_filter(new_layer_filter: &LayerFilter) -> Result<()> {
     let state = get();
-    let mut map_renderer = state.main_map_renderer.lock().unwrap();
-    let mut main_map_layer_kind = state.main_map_layer_kind.lock().unwrap();
+    let mut main_map_state = state.main_map_state.lock().unwrap();
 
-    let layer_kind = layer_kind.to_internal();
-    let journey_bitmap = state
-        .storage
-        .get_latest_bitmap_for_main_map_renderer(&layer_kind)?;
-    map_renderer.replace(journey_bitmap);
-    *main_map_layer_kind = layer_kind;
-
+    if *new_layer_filter != main_map_state.layer_filter {
+        main_map_state.layer_filter = *new_layer_filter;
+        reload_main_map_bitmap(&state.storage, &mut main_map_state)?;
+    }
     Ok(())
 }
 
+#[auto_context]
 fn reset_gps_preprocessor_if_finalized<F>(finalize_op: F) -> Result<bool>
 where
     F: FnOnce(&mut main_db::Txn) -> Result<bool>,
@@ -387,7 +522,7 @@ where
     // is quite complex. We should fix all the locking mess.
     let mut gps_preprocessor = state.gps_preprocessor.lock().unwrap();
     let finalized = state.storage.with_db_txn(finalize_op)?;
-    // when journey is finalzied, we should reset the gps_preprocessor to prevent old state affecting new journey
+    // when journey is finalized, we should reset the gps_preprocessor to prevent old state affecting new journey
     if finalized {
         *gps_preprocessor = GpsPreprocessor::new();
     }
@@ -398,8 +533,8 @@ pub fn finalize_ongoing_journey() -> Result<bool> {
     reset_gps_preprocessor_if_finalized(|txn| txn.finalize_ongoing_journey())
 }
 
-pub fn try_auto_finalize_journy() -> Result<bool> {
-    reset_gps_preprocessor_if_finalized(|txn| txn.try_auto_finalize_journy())
+pub fn try_auto_finalize_journey() -> Result<bool> {
+    reset_gps_preprocessor_if_finalized(|txn| txn.try_auto_finalize_journey())
 }
 
 pub fn has_ongoing_journey() -> Result<bool> {
@@ -425,7 +560,7 @@ pub fn days_with_journey(year: i32, month: i32) -> Result<Vec<i32>> {
         .with_db_txn(|txn| txn.days_with_journey(year, month))
 }
 
-pub fn list_journy_on_date(year: i32, month: u32, day: u32) -> Result<Vec<JourneyHeader>> {
+pub fn list_journey_on_date(year: i32, month: u32, day: u32) -> Result<Vec<JourneyHeader>> {
     let date = NaiveDate::from_ymd_opt(year, month, day).unwrap();
     get()
         .storage
@@ -436,6 +571,12 @@ pub fn list_all_journeys() -> Result<Vec<JourneyHeader>> {
     get()
         .storage
         .with_db_txn(|txn| txn.query_journeys(None, None))
+}
+
+pub fn get_journey_header(journey_id: String) -> Result<Option<JourneyHeader>> {
+    get()
+        .storage
+        .with_db_txn(|txn| txn.get_journey_header(&journey_id))
 }
 
 pub fn generate_full_archive(target_filepath: String) -> Result<()> {
@@ -463,6 +604,7 @@ pub enum ExportType {
     KML = 1,
 }
 
+#[auto_context]
 pub fn export_journey(
     target_filepath: String,
     journey_id: String,
@@ -488,28 +630,56 @@ pub fn export_journey(
     }
 }
 
+#[auto_context]
+pub fn export_raw_data_gpx_file(csv_filepath: String) -> Result<String> {
+    let csv_path = Path::new(&csv_filepath);
+    let file_name = csv_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Failed to parse filename: {csv_filepath}"))?;
+
+    let target_dir = Path::new(&get().storage.cache_dir).join("raw_data");
+
+    if !target_dir.exists() {
+        std::fs::create_dir_all(&target_dir)?;
+    }
+
+    let gpx_path = target_dir.join(file_name).with_extension("gpx");
+    let gpx_path_str = gpx_path.to_string_lossy().to_string();
+
+    if gpx_path.exists() {
+        return Ok(gpx_path_str);
+    }
+
+    let csv_file = File::open(csv_path)
+        .with_context(|| format!("Failed to open source CSV file: {csv_filepath}"))?;
+    let mut reader = Reader::from_reader(BufReader::new(csv_file));
+
+    let gpx_file = File::create(&gpx_path)
+        .with_context(|| format!("Failed to create target GPX file: {gpx_path_str}"))?;
+
+    let mut writer = BufWriter::new(gpx_file);
+
+    raw_data_csv_to_gpx_file(&mut reader, &mut writer)
+        .with_context(|| format!("Failed to convert CSV to GPX: {csv_filepath}"))?;
+
+    Ok(gpx_path_str)
+}
+
 pub fn delete_all_journeys() -> Result<()> {
     info!("Delete all journeys");
     get().storage.with_db_txn(|txn| txn.delete_all_journeys())
 }
 
-pub fn import_archive(mldx_file_path: String) -> Result<()> {
-    info!("Import Archived Data");
-    get()
-        .storage
-        .with_db_txn(|txn| archive::import_mldx(txn, &mldx_file_path))?;
-    Ok(())
-}
-
-pub fn update_journey_metadata(id: &str, journeyinfo: JourneyInfo) -> Result<()> {
+pub fn update_journey_metadata(id: &str, journey_info: JourneyInfo) -> Result<()> {
     get().storage.with_db_txn(|txn| {
         txn.update_journey_metadata(
             id,
-            journeyinfo.journey_date,
-            journeyinfo.start_time,
-            journeyinfo.end_time,
-            journeyinfo.note,
-            journeyinfo.journey_kind,
+            journey_info.journey_date,
+            journey_info.start_time,
+            journey_info.end_time,
+            journey_info.note,
+            journey_info.journey_kind,
         )
     })?;
     Ok(())
@@ -560,25 +730,21 @@ pub fn optimize_main_db() -> Result<()> {
     get().storage.with_db_txn(|txn| txn.optimize())
 }
 
-pub fn area_of_main_map() -> u64 {
-    let mut main_map_renderer = get().main_map_renderer.lock().unwrap();
-    main_map_renderer.get_current_area()
-}
-
-pub fn restart_map_server() -> Result<()> {
+pub fn area_of_main_map() -> Option<u64> {
     let state = get();
-    let mut map_server = state.map_server.lock().unwrap();
-    map_server.restart()
+    let mut main_map_state = state.main_map_state.lock().unwrap();
+    if main_map_state.dropped_for_power_saving {
+        None
+    } else {
+        Some(main_map_state.map_renderer.get_current_area())
+    }
 }
 
 pub fn rebuild_cache() -> Result<()> {
     let state = get();
     state.storage.clear_all_cache()?;
-    let bitmap = state
-        .storage
-        .get_latest_bitmap_for_main_map_renderer(&InternalLayerKind::All)?;
-    state.main_map_renderer.lock().unwrap().replace(bitmap);
-    Ok(())
+    let mut main_map_state = state.main_map_state.lock().unwrap();
+    reload_main_map_bitmap(&state.storage, &mut main_map_state)
 }
 
 // This is used for showing additional prompt to the user when trying to import
@@ -603,9 +769,49 @@ pub fn contains_bitmap_journey() -> Result<bool> {
 pub mod for_testing {
     use std::sync::{Arc, Mutex};
 
-    use crate::renderer::MapRenderer;
+    use super::MainMapState;
 
-    pub fn get_main_map_renderer() -> Arc<Mutex<MapRenderer>> {
-        super::get().main_map_renderer.clone()
+    pub fn get_main_map_state() -> Arc<Mutex<MainMapState>> {
+        super::get().main_map_state.clone()
     }
+}
+
+#[frb(sync)]
+pub fn get_mapbox_access_token() -> Option<String> {
+    build_info::MAPBOX_ACCESS_TOKEN.map(|x| x.to_string())
+}
+
+pub fn free_resource_for_long_time_background() {
+    let state = get();
+    let mut main_map_state = state.main_map_state.lock().unwrap();
+    // TODO: ideally we want to free the whole map renderer and make it optional.
+    // The current approach of having a flag and replacing the bitmap with an
+    // empty one is a bit error-prone.
+    if !main_map_state.dropped_for_power_saving {
+        main_map_state.dropped_for_power_saving = true;
+        main_map_state.map_renderer.replace(JourneyBitmap::new());
+        info!("Journey bitmap for the main map is dropped for power saving.");
+    }
+}
+
+pub fn reload_resource_for_foreground() -> Result<()> {
+    let state = get();
+    let mut main_map_state = state.main_map_state.lock().unwrap();
+    if main_map_state.dropped_for_power_saving {
+        info!("loading back main map");
+        main_map_state.dropped_for_power_saving = false;
+        reload_main_map_bitmap(&state.storage, &mut main_map_state)?;
+        info!("main map loaded");
+    }
+    Ok(())
+}
+pub fn main_map_bitmap_check_invariant_and_debug_log() {
+    let state = get();
+    let mut main_map_state = state.main_map_state.lock().unwrap();
+    main_map_state
+        .map_renderer
+        .update(|journey_bitmap, _change_callback| {
+            // we are not changing anything here.
+            journey_bitmap.check_invariant_and_debug_log();
+        });
 }

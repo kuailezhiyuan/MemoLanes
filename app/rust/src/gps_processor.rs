@@ -1,11 +1,13 @@
 use crate::{
+    journey_date_picker::JourneyDatePicker,
     journey_header::{JourneyHeader, JourneyType},
     journey_vector::{JourneyVector, TrackPoint, TrackSegment},
-    main_db::OngoingJourney,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
+use auto_context::auto_context;
 use chrono::DateTime;
 
+// TODO: This is the same as `TrackPoint`, we should unify them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Point {
     pub latitude: f64,
@@ -27,6 +29,43 @@ impl Point {
         let c = 2.0 * a.sqrt().atan2((1.0 - a).sqrt());
 
         r * c // Distance in meters
+    }
+
+    pub fn to_cartesian(&self) -> (f64, f64, f64) {
+        let lon_rad = Point::to_radians(self.longitude);
+        let lat_rad = Point::to_radians(self.latitude);
+        let x = lat_rad.cos() * lon_rad.cos();
+        let y = lat_rad.cos() * lon_rad.sin();
+        let z = lat_rad.sin();
+        (x, y, z)
+    }
+
+    pub fn to_geographic(x: f64, y: f64, z: f64) -> Point {
+        let lon = Point::to_degrees(y.atan2(x));
+        let lat = Point::to_degrees(z.atan2((x * x + y * y).sqrt()));
+        Point {
+            latitude: lat,
+            longitude: Point::normalize_longitude(lon),
+        }
+    }
+
+    fn to_radians(deg: f64) -> f64 {
+        use std::f64::consts::PI;
+        deg * PI / 180.0
+    }
+    fn to_degrees(rad: f64) -> f64 {
+        use std::f64::consts::PI;
+        rad * 180.0 / PI
+    }
+
+    fn normalize_longitude(mut lon: f64) -> f64 {
+        while lon >= 180.0 {
+            lon -= 360.0;
+        }
+        while lon < -180.0 {
+            lon += 360.0;
+        }
+        lon
     }
 }
 
@@ -56,6 +95,11 @@ mod point_tests {
         assert_eq!(point1.haversine_distance(&point1) as i32, 0);
         assert_eq!(point1.haversine_distance(&point2) as i32, 109);
         assert_eq!(point2.haversine_distance(&point1) as i32, 109);
+
+        assert_eq!(
+            point(0.0, 0.1).haversine_distance(&point(0.0, -0.1)) as i32,
+            22238
+        );
 
         // antimeridian
         assert_eq!(
@@ -189,16 +233,33 @@ enum GpsPreprocessorState {
     },
 }
 
+struct SegmentGapThreshold {
+    distance_m: f64,
+    max_gap_sec: i64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SegmentGapRule {
+    Default,
+    Spare,
+}
+
 pub struct GpsPreprocessor {
     state: GpsPreprocessorState,
     bad_data_detector: BadDataDetector,
+    rule: SegmentGapRule,
 }
 
 impl GpsPreprocessor {
     pub fn new() -> Self {
-        GpsPreprocessor {
+        Self::new_with_rule(SegmentGapRule::Default)
+    }
+
+    pub fn new_with_rule(rule: SegmentGapRule) -> Self {
+        Self {
             state: GpsPreprocessorState::Empty,
             bad_data_detector: BadDataDetector::new(),
+            rule,
         }
     }
 
@@ -217,10 +278,43 @@ impl GpsPreprocessor {
     }
 
     fn process_moving_data(
+        rule: SegmentGapRule,
         last_point: &Point,
         last_timestamp_ms: Option<i64>,
         curr_data: &RawData,
     ) -> ProcessResult {
+        // Rules must be ordered by `distance_m` in ascending order.
+        // The first matching rule is applied.
+        type SegmentGapProfile = &'static [SegmentGapThreshold; 3];
+        const DEFAULT_SEGMENT_GAP_RULES: SegmentGapProfile = &[
+            SegmentGapThreshold {
+                distance_m: 5.0,
+                max_gap_sec: 3600,
+            },
+            SegmentGapThreshold {
+                distance_m: 50.0,
+                max_gap_sec: 20,
+            },
+            SegmentGapThreshold {
+                distance_m: 1000.0,
+                max_gap_sec: 4,
+            },
+        ];
+        const SPARE_SEGMENT_GAP_RULES: SegmentGapProfile = &[
+            SegmentGapThreshold {
+                distance_m: 5.0,
+                max_gap_sec: 3600,
+            },
+            SegmentGapThreshold {
+                distance_m: 150.0,
+                max_gap_sec: 240,
+            },
+            SegmentGapThreshold {
+                distance_m: 1000.0,
+                max_gap_sec: 120,
+            },
+        ];
+
         const TOO_CLOSE_DISTANCE_IN_M: f64 = 0.1;
 
         let distance_in_m = curr_data.point.haversine_distance(last_point);
@@ -233,32 +327,31 @@ impl GpsPreprocessor {
                 (None, _) | (_, None) => None,
             };
 
-            if distance_in_m <= 1_000. {
-                match time_diff_in_ms {
-                    // don't have timestamp, just be conservative and append
-                    None => ProcessResult::Append,
-                    Some(time_diff_in_ms) => {
-                        // more willing to connect two points if they are close
-                        // in normal condition, we should have 1 data per sec
-                        // we should mostly trust the data here and try to
-                        // filter out bad ones in `BadDataDetector`.
-                        let time_threshold_in_sec = if distance_in_m < 5. {
-                            60 * 60 // 1h
-                        } else if distance_in_m < 50. {
-                            20 // 20 sec
-                        } else {
-                            4 // 4 sec
-                        };
-                        if time_diff_in_ms <= time_threshold_in_sec * 1000 {
-                            ProcessResult::Append
-                        } else {
-                            ProcessResult::NewSegment
+            match time_diff_in_ms {
+                // don't have timestamp, just be conservative and append
+                None => ProcessResult::Append,
+                Some(time_diff_in_ms) => {
+                    // more willing to connect two points if they are close
+                    // in normal condition, we should have 1 data per sec
+                    // we should mostly trust the data here and try to
+                    // filter out bad ones in `BadDataDetector`.
+                    for rule in match rule {
+                        SegmentGapRule::Default => DEFAULT_SEGMENT_GAP_RULES,
+                        SegmentGapRule::Spare => SPARE_SEGMENT_GAP_RULES,
+                    }
+                    .iter()
+                    {
+                        if distance_in_m <= rule.distance_m {
+                            return if time_diff_in_ms <= rule.max_gap_sec * 1000 {
+                                ProcessResult::Append
+                            } else {
+                                ProcessResult::NewSegment
+                            };
                         }
                     }
+                    // Too far, start a new segment
+                    ProcessResult::NewSegment
                 }
-            } else {
-                // Too far, start a new segment
-                ProcessResult::NewSegment
             }
         }
     }
@@ -308,7 +401,8 @@ impl GpsPreprocessor {
                 timestamp_ms_when_center_point_picked,
                 num_of_data_since_center_point_picked,
             } => {
-                let result = Self::process_moving_data(last_point, *last_timestamp_ms, curr_data);
+                let result =
+                    Self::process_moving_data(self.rule, last_point, *last_timestamp_ms, curr_data);
                 if result != ProcessResult::Ignore {
                     *last_point = curr_data.point.clone();
                     *last_timestamp_ms = curr_data.timestamp_ms;
@@ -364,8 +458,12 @@ impl GpsPreprocessor {
                     ProcessResult::Ignore
                 } else {
                     //then ending stationary change to move mode
-                    let result =
-                        Self::process_moving_data(center_point, *last_timestamp_ms, curr_data);
+                    let result = Self::process_moving_data(
+                        self.rule,
+                        center_point,
+                        *last_timestamp_ms,
+                        curr_data,
+                    );
                     self.state = start_moving(curr_data);
                     result
                 }
@@ -380,50 +478,46 @@ pub struct PreprocessedData {
     pub process_result: ProcessResult,
 }
 
-pub fn build_vector_journey(
+#[auto_context]
+pub fn build_journey_vector(
     results: impl Iterator<Item = Result<PreprocessedData>>,
-) -> Result<Option<OngoingJourney>> {
-    let mut segmants = Vec::new();
+    mut journey_date_picker: Option<&mut JourneyDatePicker>,
+) -> Result<Option<JourneyVector>> {
+    let mut segments = Vec::new();
     let mut current_segment = Vec::new();
 
-    let mut start_timestamp_sec = None;
-    let mut end_timestamp_sec = None;
     for result in results {
         let data = result?;
-        if data.timestamp_sec.is_some() {
-            end_timestamp_sec = data.timestamp_sec;
-        }
-        if start_timestamp_sec.is_none() {
-            start_timestamp_sec = data.timestamp_sec;
-        }
         let need_break = data.process_result == ProcessResult::NewSegment;
         if need_break && !current_segment.is_empty() {
-            segmants.push(TrackSegment {
+            segments.push(TrackSegment {
                 track_points: current_segment,
             });
             current_segment = Vec::new();
         }
         if data.process_result != ProcessResult::Ignore {
+            if let Some(journey_date_picker) = journey_date_picker.as_mut() {
+                if let Some(time) = data
+                    .timestamp_sec
+                    .map(|x| DateTime::from_timestamp(x, 0).unwrap())
+                {
+                    journey_date_picker.add_point(time, &data.track_point);
+                }
+            }
             current_segment.push(data.track_point);
         }
     }
     if !current_segment.is_empty() {
-        segmants.push(TrackSegment {
+        segments.push(TrackSegment {
             track_points: current_segment,
         });
     }
 
-    if segmants.is_empty() {
+    if segments.is_empty() {
         Ok(None)
     } else {
-        let start = start_timestamp_sec.map(|x| DateTime::from_timestamp(x, 0).unwrap());
-        let end = end_timestamp_sec.map(|x| DateTime::from_timestamp(x, 0).unwrap());
-        Ok(Some(OngoingJourney {
-            start,
-            end,
-            journey_vector: JourneyVector {
-                track_segments: segmants,
-            },
+        Ok(Some(JourneyVector {
+            track_segments: segments,
         }))
     }
 }

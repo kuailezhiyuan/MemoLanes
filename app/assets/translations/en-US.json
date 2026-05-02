@@ -5,9 +5,22 @@
     "resume": "Resume",
     "end_journey_title": "End Journey?",
     "end_journey_message": "Are you sure you want to end your current journey?",
-    "location_permission_denied": "You have denied location permission. To ensure the use of positioning functions, please turn it on in settings.",
+    "double_back_exit": "Press back again to exit the app",
+    "map_data_source_copyright_title": "Data Source"
+  },
+  "location_service": {
+    "location_service_disabled": "Location services are disabled. Please enable them in the settings.",
+    "location_permission_permanently_denied": "You have denied location permission, therefore location-based features are disabled. If you want to use these features, please enable it in the app settings.",
+    "location_permission_reason": "MemoLanes needs location permission to collect your precise location data to record your travel routes and visualize your journey history. All location data is stored locally on your device and is not shared with any third parties.",
+    "battery_optimization_reason": "To ensure continuous background location updates, please allow the app to ignore battery optimization.",
+    "battery_optimization_denied": "You have declined to ignore battery optimization, which may cause the app to run unstable in the background. Please allow it in the app settings.",
+    "android_foreground_notification_channel_name": "Tracking Service",
     "android_foreground_notification_title": "Recording in Background",
-    "android_foreground_notification_text": "MemoLanes will continue to reocrd in the background"
+    "android_foreground_notification_text": "MemoLanes will continue to record in the background",
+    "location_backend": {
+      "title": "Location Service",
+      "native": "Native"
+    }
   },
   "common": {
     "memolanes": "MemoLanes",
@@ -17,38 +30,120 @@
     "info": "Info",
     "save": "Save",
     "share": "Share",
-    "export": "Export"
+    "export": "Export",
+    "edit": "Edit",
+    "delete": "Delete",
+    "please_enter": "Please enter",
+    "still_under_development": "Still under development",
+    "copy_success": "Copied",
+    "save_success": "Saved successfully",
+    "save_confirm": "Do you want to save the changes?"
   },
   "journey": {
+    "editor": {
+      "move": "Move",
+      "draw": "Draw",
+      "erase": "Erase",
+      "undo": "Undo",
+      "save": "Save",
+      "page_title": "Edit Journey Track",
+      "draw_mode_enabled": "Drawing mode is enabled. Draw on the map to add new tracks.",
+      "draw_mode_disabled": "Drawing mode is disabled. Use two fingers to pinch and zoom the map, then adjust to an appropriate zoom level to continue drawing.",
+      "erase_mode_enabled": "Erase mode enabled. Draw a box to delete tracks.",
+      "bitmap_not_supported": "Editing a bitmap record (usually imported from Fog of World) is not supported.",
+      "discard_changes_confirm": "Unsaved changes will be lost. Do you want to continue?",
+      "zoom_too_low": "Zoom in to add a new segment."
+    },
     "no_data": "There's no data yet, go ahead and explore the world!",
+    "journey_date_is_empty": "JourneyDate is empty",
     "delete_journey_title": "Delete Journey",
     "delete_journey_message": "Delete this journey record?",
-    "delete": "Delete",
+    "stop_ongoing_journey": "Please stop the current ongoing journey before this operation.",
+    "delete_all_journey_message": "This will delete all journeys in this app. Are you sure?",
     "journey_info_page_title": "Journey Information",
     "journey_info_edit_page_title": "Edit Journey Information",
+    "import_mldx_data": "Import MLDX Data",
+    "import_kml_gpx_data": "Import KML/GPX Data",
+    "import_fog_of_world_data": "Import [Fog of World] Data",
     "export_journey_as_kml": "Export as KML",
     "export_journey_as_gpx": "Export as GPX",
     "export_journey_as_mldx": "Export as MLDX",
-    "import_kml_gpx_data": "Import KML/GPX Data",
-    "archive_all_as_mldx": "Archive All (mldx file)",
     "delete_all": "Delete All Journeys",
-    "import_mldx": "Import Archive (mldx file)"
+    "delete_all_success": "All journeys are deleted!",
+    "preprocessor": "Preprocessor",
+    "journey_date": "Journey Date",
+    "journey_kind": "Journey Kind",
+    "start_time": "Start Time",
+    "end_time": "End Time",
+    "created_at": "Created At",
+    "note": "Note"
   },
   "db_optimization": {
     "notification": "Your database requires optimization, please go to Settings tab and click [Optimize database] button.",
     "button": "Optimize database",
     "already_optimized": "Database is already optimized. Nothing to do.",
     "confirm": "Your database requires optimization. It is recommended to backup your data before proceeding.",
-    "finsih": "Finsihsed optimizing database."
+    "finish": "Finished optimizing database."
   },
   "journey_kind": {
-    "default": "Default",
-    "flight": "Flight"
+    "default": "Ground",
+    "flight": "Flight",
+    "current": "Current"
   },
-  "import_fow_data": {
-    "button": "Import [Fog of World] data",
-    "description_md": "Import data generated by the Fog of World app.  \nThis is an experimental feature and currently only supports importing the Sync folder (compressed in Zip format) from Fog of World's cloud sync.  \nFor more granular control, such as importing multiple segments of data, you can try using the \"Export MemoLanes Archive\" feature provided by [Fog Machine - Time Machine](https://fogmachine.8bits.io/time-machine).",
-    "warning_for_import_multiple_data_md": "Note: The database already contains Fog of World data.  \nImporting multiple Fog of World data may not be ideal (e.g., simple merging may cause duplicate data).  \n\nFor more precise control (such as processing snapshots individually and computing differences), we recommend using [Fog Machine - Time Machine](https://fogmachine.8bits.io/time-machine)."
+  "time_machine": {
+    "menu_title_time": "Time",
+    "menu_title_view": "View",
+    "menu_title_granularity": "Granularity",
+    "menu_title_layer": "Layer",
+    "menu_view_period": "Period",
+    "menu_view_as_of": "As of",
+    "menu_view_custom": "Custom",
+    "menu_year": "Year",
+    "menu_month": "Month",
+    "menu_day": "Day",
+    "menu_any": "Any"
+  },
+  "preprocessor": {
+    "generic": "Generic Mode",
+    "flightTrack": "Flight Track Mode",
+    "none": "None",
+    "spare": "Spare Mode",
+    "description_md": "Preprocessor can optimize your journey data:\n- **Generic** suitable for most tracks, filtering out abnormal data and reasonably segmenting the data.\n- **FlightTrack** suitable for flight tracks, etc., using interpolation to complete missing parts of the path.\n- **Sparse**: Suitable for sparse data recorded at low frequency.",
+    "spare_md": "Based on the properties of the file, 'Spare Mode' has been automatically selected for you.\nYou can also try other preprocessors, but they may not perform well on low-density data."
+  },
+  "import": {
+    "shared_file": {
+      "confirm_title": "Import data",
+      "confirm_message": "Do you want to import the file: {}?",
+      "multi_message": "You selected multiple files. Only one file can be imported at a time.\nPlease select a single file and try again."
+    },
+    "unsupported_file_failed": "Unsupported file",
+    "empty_data": "Journey is empty",
+    "successful": "Import successful",
+    "parsing_failed": "Data parsing failed",
+    "mldx_preview": {
+      "title": "Archive Import",
+      "skipped_identical": "{} identical journey(s) skipped",
+      "new_count": "{} new journey(s)",
+      "list_section_title": "Journeys to import",
+      "select_all": "Select all",
+      "deselect_all": "Deselect all",
+      "confirm_import": "Confirm Import",
+      "conflict_label": "Conflict",
+      "conflict_force_confirm": "Force overwrite? Selected journey(s) will overwrite the local version of this journey.",
+      "conflict_hint": "{} journey(s) conflict with local, unchecked by default.",
+      "select_at_least_one": "Please select at least one journey to import.",
+      "all_skipped": "{} identical journey(s) skipped. Nothing to import.",
+      "last_modified": "Modified: {}",
+      "conflict_desc_import_newer": "Import version is newer",
+      "conflict_desc_local_newer": "Local version is newer",
+      "conflict_desc_same_time": "Same modified date; choose as needed",
+      "conflict_desc_unknown": "Local modified date unavailable; choose carefully"
+    },
+    "import_fow_data": {
+      "description_md": "Import data generated from the Fog of World app.\n\nThis feature supports the following formats:\n1. Zip format: Compress the Fog of World cloud sync \"Sync\" folder into a Zip archive.\n2. Fwss format: Fog of World snapshot file.\n\nThe Fog of World app data does not include history. The exported data only contains the whole tracks from the start until the export point. If you have multiple historical Fog of World data, you can try uploading these to [Fog Machine - Time Machine](https://fogmachine.8bits.io/time-machine) and using the \"Export MemoLanes Archive\" feature.",
+      "warning_for_import_multiple_data_md": "Note: The database already contains Fog of World data.\n\nWhen importing multiple data snapshots, please ensure that these snapshots do not overlap, or use the \"Export MemoLanes Archive\" feature in [Fog Machine - Time Machine](https://fogmachine.8bits.io/time-machine). This feature processes snapshots one by one by calculating differences, achieving the effect of matching historical tracks with their corresponding time."
+    }
   },
   "unexpected_exit_notification": {
     "setting_title": "Unexpected exit notification",
@@ -60,11 +155,71 @@
   },
   "achievement": {
     "title": "Achievements",
-    "explored_area": "Explored area: {} km²"
+    "explored_area": "Explored area: {} km²",
+    "coming_soon": "Stats and achievements are coming soon"
   },
-  "advance_settings": {
-    "export_logs": "Export Logs",
-    "raw_data_mode": "Raw Data Mode",
-    "rebuild_cache": "Rebuild Cache"
+  "general": {
+    "title": "General",
+    "version": {
+      "title": "Version",
+      "currently_the_latest_version": "Currently the latest version"
+    },
+    "map_settings": {
+      "title": "Map Settings",
+      "style": "Map Style",
+      "style_name": {
+        "maplibre": "MapLibre Demo Tile",
+        "openfreemap": "OpenFreeMap"
+      }
+    },
+    "advanced_settings": {
+      "title": "Advanced settings",
+      "export_logs": "Export Logs",
+      "raw_data_mode": "Raw Data Mode",
+      "raw_data_export_csv": "Export as CSV",
+      "raw_data_export_gpx": "Export as GPX",
+      "rebuild_cache": "Rebuild Cache",
+      "render_diagnostics": "Render Diagnostics"
+    }
+  },
+  "data": {
+    "title": "Data",
+    "backup_data": {
+      "title": "Backup data",
+      "last_backup_time": "Last backup time",
+      "backup": "Backup",
+      "delete_backup_data": "Delete backup data"
+    },
+    "import_data": {
+      "title": "Import data",
+      "unsupported_file": "Unsupported file"
+    },
+    "export_data": {
+      "export_all": "Export All Data"
+    }
+  },
+  "settings": {
+    "other": "Other",
+    "about": "About"
+  },
+  "beta_testing_notice": {
+    "title": "Welcome to MemoLanes Public Beta",
+    "content_md": "Thank you for testing MemoLanes!\n\nPlease be aware of the following:\n* The app may occasionally lag, crash, or glitch.\n* Features are still being optimized and may change in the final release, so they may not reflect their final quality.\n* We recommend backing up your data regularly (go to the far-right [Settings] icon on the navigation bar > [Export All Data]).\n\nIf you run into any issues, please take a screenshot to share with our team—it helps a lot! Suggestions are also welcome. You can find us via [Settings] > [Contact Us].\n\nIf you enjoy using MemoLanes, feel free to share it with others. Your support motivates us to keep improving. 🫶🏻\n\nWish you great journeys ahead—let’s explore the world together! 🚀"
+  },
+  "privacy": {
+    "url": "https://app.memolanes.com/en/privacy/",
+    "privacy_tip_title": "Privacy Policy Notice",
+    "privacy_tip_message_md": "You need to agree to the privacy policy before using MemoLanes.\n\nYou can read the full version of the [MemoLanes Privacy Policy](@:privacy.url) for more details.",
+    "name": "Privacy Policy",
+    "agree": "Agree",
+    "disagree_and_exit": "Disagree And Exit"
+  },
+  "contact_us": {
+    "title": "Contact Us",
+    "website": "Official Website",
+    "email": "Email",
+    "rednote": "Rednote",
+    "qq_group": "QQ Group",
+    "weibo": "Weibo"
   }
 }

@@ -1,5 +1,11 @@
-use memolanes_core::api::api::{get_map_renderer_proxy_for_main_map, import_archive, init};
+use memolanes_core::api::api::for_testing::get_main_map_state;
+use memolanes_core::api::api::init;
+mod shared;
+use memolanes_core::api::import::OpaqueMldxReader;
+use memolanes_core::renderer::MapRenderer;
+use shared::MapServer;
 use std::env;
+use std::sync::{Arc, Mutex};
 
 pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
@@ -15,15 +21,34 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() > 1 {
         let mldx_file_path = &args[1];
         println!("Importing MLDX file: {mldx_file_path}");
-        match import_archive(mldx_file_path.to_string()) {
-            Ok(_) => println!("Successfully imported MLDX file"),
+        let mldx_file = OpaqueMldxReader::open(mldx_file_path.to_string())?;
+        match mldx_file.import_journeys(None) {
+            Ok(()) => {
+                println!("Successfully imported archive.");
+            }
             Err(e) => eprintln!("Failed to import MLDX file: {e:?}"),
         }
         return Ok(());
     }
 
-    let proxy = get_map_renderer_proxy_for_main_map();
-    println!("view map at: {}&debug=true", proxy.get_url());
+    // HACK: we just make a full copy here, thus later updates won't be reflected in the server.
+    let main_map_state = get_main_map_state();
+    let journey_bitmap = main_map_state
+        .lock()
+        .unwrap()
+        .map_renderer
+        .peek_latest_bitmap()
+        .clone();
+    let server = MapServer::create_and_start(
+        "localhost",
+        None,
+        Arc::new(Mutex::new(MapRenderer::new(journey_bitmap))),
+    )
+    .expect("Failed to start server");
+
+    println!("view map at: {}", server.get_http_url());
+
+    let _server = Arc::new(Mutex::new(server));
 
     // Set up ctrl+c handler
     ctrlc::set_handler(move || {

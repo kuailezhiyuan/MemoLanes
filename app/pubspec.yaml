@@ -37,7 +37,7 @@ dependencies:
   cupertino_icons: ^1.0.8
   rust_builder:
     path: rust_builder
-  flutter_rust_bridge: ^2.10.0
+  flutter_rust_bridge: 2.12.0
   # Meta package pinned by flutter SDK
   meta: ^1.12.0
   uuid: ^4.4.2
@@ -45,17 +45,16 @@ dependencies:
   provider: ^6.1.2
   path_provider: ^2.1.3
   mutex: ^3.1.0
-  share_plus: ^11.0.0
-  permission_handler: ^11.3.1
+  share_plus: ^12.0.0
+  permission_handler: ^12.0.1
   file_picker: ^10.1.2
   freezed_annotation: ^3.0.0
-  fluttertoast: ^8.2.6
+  fluttertoast: ^9.0.0
   intl: ^0.20.2
-  package_info_plus: ^8.0.0
-  device_info_plus: ^11.2.0
+  package_info_plus: ^9.0.0
+  device_info_plus: ^12.1.0
   url_launcher: ^6.3.0
   badges: ^3.1.2
-  shared_preferences: ^2.2.3
   flutter_local_notifications: ^19.1.0
   notification_when_app_is_killed: ^0.0.4
   easy_localization: ^3.0.7
@@ -72,6 +71,12 @@ dependencies:
   logging: ^1.3.0
   wakelock_plus: ^1.3.2
   fpdart: ^1.1.1
+  sliding_up_panel: ^2.0.0+1
+  mmkv: ^2.2.2
+  share_handler: ^0.0.25
+  flutter_fgbg: ^0.7.1
+  flutter_appbar: ^1.9.0
+  flutter_app_intents: ^0.7.0
 
 dependency_overrides:
   geolocator_android:
@@ -79,6 +84,11 @@ dependency_overrides:
       url: https://github.com/MemoLanes/flutter-geolocator
       ref: main
       path: geolocator_android
+  share_plus:
+    git:
+      url: https://github.com/MemoLanes/plus_plugins
+      ref: main
+      path: packages/share_plus/share_plus
 
 dev_dependencies:
   flutter_test:
@@ -90,7 +100,7 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
-  ffigen: ^19.0.0
+  ffigen: ^20.0.0
   freezed: ^3.0.2
   build_runner: ^2.4.9
   json_serializable: ^6.8.0
@@ -107,7 +117,8 @@ flutter:
 
   assets:
     - assets/translations/
-
+    - assets/map_webview/
+    
   # To add custom fonts to your application, add a fonts section here,
   # in this "flutter" section. Each entry in this list should have a
   # "family" key with the font family name, and a "fonts" key with a
@@ -127,22 +138,3 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/custom-fonts/#from-packages
-  fonts:
-    - family: MiSans
-      fonts:
-        - asset: fonts/MiSans-Thin.ttf
-          weight: 100
-        - asset: fonts/MiSans-ExtraLight.ttf
-          weight: 200
-        - asset: fonts/MiSans-Light.ttf
-          weight: 300
-        - asset: fonts/MiSans-Regular.ttf
-          weight: 400
-        - asset: fonts/MiSans-Medium.ttf
-          weight: 500
-        - asset: fonts/MiSans-Semibold.ttf
-          weight: 600
-        - asset: fonts/MiSans-Bold.ttf
-          weight: 700
-        - asset: fonts/MiSans-Heavy.ttf
-          weight: 900

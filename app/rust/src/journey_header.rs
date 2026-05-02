@@ -1,4 +1,5 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
+use auto_context::auto_context;
 use chrono::{DateTime, NaiveDate, Utc};
 use flutter_rust_bridge::frb;
 use protobuf::EnumOrUnknown;
@@ -22,7 +23,7 @@ impl JourneyType {
         match i {
             0 => Ok(JourneyType::Vector),
             1 => Ok(JourneyType::Bitmap),
-            _ => bail!("Invalid int for `JourneyType` {}", i),
+            _ => bail!("Invalid int for `JourneyType` {i}"),
         }
     }
 
@@ -59,7 +60,7 @@ mod tests {
     }
 }
 
-#[derive(Eq, Hash, Clone, Copy, Debug, PartialEq)]
+#[derive(Eq, Hash, Clone, Copy, Debug, PartialEq, EnumIter)]
 pub enum JourneyKind {
     DefaultKind,
     Flight,
@@ -106,11 +107,12 @@ pub struct JourneyHeader {
 }
 
 impl JourneyHeader {
+    #[auto_context]
     pub fn of_proto(mut proto: protos::journey::Header) -> Result<Self> {
         let journey_type = proto
             .type_
             .enum_value()
-            .map_err(|x| anyhow!("Unknown proto journey type: {}", x))?;
+            .map_err(|x| anyhow!("Unknown proto journey type: {x}"))?;
         Ok(JourneyHeader {
             id: proto.id,
             revision: proto.revision,

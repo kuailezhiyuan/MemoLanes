@@ -1,6 +1,5 @@
 pub mod test_utils;
 use memolanes_core::{api::api, gps_processor::RawData, import_data};
-use rand::prelude::SliceRandom;
 use std::fs;
 use tempdir::TempDir;
 
@@ -22,18 +21,16 @@ fn basic() {
         sub_folder("cache/"),
     );
 
-    let mut raw_data_list: Vec<RawData> =
-        import_data::load_gpx("./tests/data/raw_gps_shanghai.gpx")
-            .unwrap()
-            .into_iter()
-            .flatten()
-            .collect();
+    let (raw_data, _preprocessor) =
+        import_data::load_gpx("./tests/data/raw_gps_shanghai.gpx").unwrap();
+
+    let mut raw_data_list: Vec<RawData> = raw_data.into_iter().flatten().collect();
     let (first_elements, remaining_elements) = raw_data_list.split_at_mut(2000);
-    let map_renderer = api::for_testing::get_main_map_renderer();
+    let main_map_state = api::for_testing::get_main_map_state();
 
     assert!(!api::has_ongoing_journey().unwrap());
     for (i, raw_data) in first_elements.iter().enumerate() {
-        api::on_location_update(vec![raw_data.clone()], raw_data.timestamp_ms.unwrap());
+        api::on_location_update(raw_data.clone(), raw_data.timestamp_ms.unwrap());
         if i == 1000 {
             assert!(api::has_ongoing_journey().unwrap());
             assert!(api::finalize_ongoing_journey().unwrap());
@@ -42,10 +39,16 @@ fn basic() {
 
     // we have both ongoing journey and finalized journey at this point
     {
-        let map_renderer = map_renderer.lock().unwrap();
-        let render_result =
-            test_utils::render_map_overlay(&map_renderer, 11, 121.39, 31.3146, 121.55, 31.18);
-        drop(map_renderer);
+        let mut main_map_state = main_map_state.lock().unwrap();
+        let render_result = test_utils::render_map_overlay(
+            &mut main_map_state.map_renderer,
+            11,
+            121.39,
+            31.3146,
+            121.55,
+            31.18,
+        );
+        drop(main_map_state);
         test_utils::verify_image("end_to_end_basic_0", &render_result.data);
     }
 
@@ -54,14 +57,21 @@ fn basic() {
     assert!(!api::has_ongoing_journey().unwrap());
     assert!(!api::finalize_ongoing_journey().unwrap());
 
-    remaining_elements.shuffle(&mut rand::rng());
-    api::on_location_update(remaining_elements.to_vec(), 1695150531000);
+    for raw_data in remaining_elements {
+        api::on_location_update(raw_data.clone(), raw_data.timestamp_ms.unwrap());
+    }
 
     {
-        let map_renderer = map_renderer.lock().unwrap();
-        let render_result =
-            test_utils::render_map_overlay(&map_renderer, 11, 121.39, 31.3146, 121.55, 31.18);
-        drop(map_renderer);
+        let mut main_map_state = main_map_state.lock().unwrap();
+        let render_result = test_utils::render_map_overlay(
+            &mut main_map_state.map_renderer,
+            11,
+            121.39,
+            31.3146,
+            121.55,
+            31.18,
+        );
+        drop(main_map_state);
         test_utils::verify_image("end_to_end_basic_1", &render_result.data);
     }
 

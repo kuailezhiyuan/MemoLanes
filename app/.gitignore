@@ -1,3 +1,6 @@
+# Flutter webview assets
+assets/map_webview/
+
 # flutter rust bridge generated files
 lib/src/rust/**/*.dart
 rust/src/frb_generated.*
@@ -48,6 +51,7 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+/android/.kotlin/
 /android/mapbox-sdk-registry-token
 /.netrc
 /.env

@@ -15,6 +15,14 @@ journey-kernel-build:
     @echo "✅ Journey Kernel build completed"
 
 [group: 'utils']
+copy-webview-assets:
+    @echo "📁 Copying webview assets to Flutter"
+    @mkdir -p assets/map_webview
+    @rm -rf assets/map_webview/*
+    @cp -r journey_kernel/dist/* assets/map_webview/
+    @echo "✅ Webview assets copied"
+
+[group: 'utils']
 frb-generate:
     @echo "🔗 Generating FRB code"
     @flutter_rust_bridge_codegen generate
@@ -44,7 +52,7 @@ flutter-fmt:
 [group: 'utils']
 flutter-check:
     @echo "🔍 Analyzing Flutter code"
-    @flutter analyze --no-fatal-infos
+    @flutter analyze
     @echo "✅ Flutter code analysis completed"
 
 [group: 'utils']
@@ -90,6 +98,7 @@ get-frb-version:
 pre-build:
     @echo "🛠️  Running pre-build"
     just journey-kernel-build
+    just copy-webview-assets
     just frb-generate
     @echo "✅ Pre-build completed"
 

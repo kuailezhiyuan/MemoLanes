@@ -1,6 +1,7 @@
 extern crate simplelog;
-use anyhow::Result;
-use chrono::{DateTime, Local, NaiveDate, Utc};
+use anyhow::{Context, Result};
+use auto_context::auto_context;
+use chrono::{DateTime, Local, NaiveDate, Timelike, Utc};
 use protobuf::Message;
 use rusqlite::{Connection, OptionalExtension, Transaction};
 use std::cmp::Ordering;
@@ -9,8 +10,10 @@ use std::path::Path;
 use std::str::FromStr;
 use uuid::Uuid;
 
+pub use crate::cache_db::CacheEntry;
 use crate::gps_processor::{self, GpsPostprocessor, PreprocessedData, ProcessResult};
 use crate::journey_data::JourneyData;
+use crate::journey_date_picker::JourneyDatePicker;
 use crate::journey_header::{JourneyHeader, JourneyKind, JourneyType};
 use crate::journey_vector::{JourneyVector, TrackPoint};
 use crate::{protos, utils};
@@ -24,7 +27,7 @@ Note that it contains detailed timestamp, but these timestamp will be removed
 when finalizing the journey.
 
 `journey` keeps all finalized journeys. It stores most data as raw protobuf
-bytes and some index for faster lookup. Instead of storing a signle blob, it has
+bytes and some index for faster lookup. Instead of storing a single blob, it has
 two parts: header and data, so most common operation only need to fetch and
 deserialize the header.
 */
@@ -32,6 +35,7 @@ deserialize the header.
 // 3 is the zstd default
 pub const ZSTD_COMPRESS_LEVEL: i32 = 3;
 
+#[auto_context]
 #[allow(clippy::type_complexity)]
 fn open_db_and_run_migration(
     support_dir: &str,
@@ -57,9 +61,7 @@ fn open_db_and_run_migration(
         }
         Ordering::Greater => {
             bail!(
-                "version too high: current version = {}, target_version = {}",
-                version,
-                target_version
+                "version too high: current version = {version}, target_version = {target_version}"
             );
         }
     }
@@ -72,9 +74,16 @@ pub struct Txn<'a> {
     pub action: Option<Action>,
 }
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 pub enum Action {
-    Merge { journey_ids: Vec<String> },
+    /// `MergeOne` is aimed to optimize the most common case: end the current ongoing journey and update the internal state.
+    MergeOne {
+        entry: CacheEntry,
+        data: JourneyData,
+    },
+    Invalidate {
+        entries: Vec<CacheEntry>,
+    },
     CompleteRebuilt,
 }
 
@@ -85,24 +94,53 @@ fn generate_random_revision() -> String {
 // NOTE: the `Txn` here is not only for making operation atomic, the `storage`
 // will also use this to make sure the `cache_db` is in sync.
 impl Txn<'_> {
-    pub fn get_ongoing_journey(&self) -> Result<Option<OngoingJourney>> {
+    fn set_invalidate_action(&mut self, new_entries: Vec<CacheEntry>) -> Result<()> {
+        self.action = Some(match self.action.take() {
+            Some(Action::CompleteRebuilt) => Action::CompleteRebuilt,
+            Some(Action::Invalidate { mut entries }) => {
+                entries.extend(new_entries);
+                Action::Invalidate { entries }
+            }
+            Some(Action::MergeOne {
+                entry: prev_entry, ..
+            }) => {
+                let mut entries = new_entries;
+                entries.push(prev_entry);
+                Action::Invalidate { entries }
+            }
+            None => Action::Invalidate {
+                entries: new_entries,
+            },
+        });
+        Ok(())
+    }
+
+    pub fn get_ongoing_journey(
+        &self,
+        journey_date_picker: Option<&mut JourneyDatePicker>,
+    ) -> Result<Option<JourneyVector>> {
         // `id` in `ongoing_journey` is auto incremented.
         let mut query = self.db_txn.prepare(
             "SELECT timestamp_sec, lat, lng, process_result FROM ongoing_journey ORDER BY id;",
         )?;
-        let results = query.query_map((), |row| {
-            let timestamp_sec: Option<i64> = row.get(0)?;
-            let process_result: i8 = row.get(3)?;
-            Ok(PreprocessedData {
-                timestamp_sec,
-                track_point: TrackPoint {
-                    latitude: row.get(1)?,
-                    longitude: row.get(2)?,
-                },
-                process_result: process_result.into(),
+        let results = query
+            .query_map((), |row| {
+                let timestamp_sec: Option<i64> = row.get(0)?;
+                let process_result: i8 = row.get(3)?;
+                Ok(PreprocessedData {
+                    timestamp_sec,
+                    track_point: TrackPoint {
+                        latitude: row.get(1)?,
+                        longitude: row.get(2)?,
+                    },
+                    process_result: process_result.into(),
+                })
             })
-        })?;
-        gps_processor::build_vector_journey(results.map(|x| x.map_err(|x| x.into())))
+            .context("get_onging_journey")?;
+        gps_processor::build_journey_vector(
+            results.map(|x| x.map_err(|x| x.into())),
+            journey_date_picker,
+        )
     }
 
     // the fist timestamp is the start time, the second is the end time
@@ -113,11 +151,13 @@ impl Txn<'_> {
         let mut query = self
             .db_txn
             .prepare("SELECT * FROM (SELECT timestamp_sec FROM ongoing_journey ORDER BY id ASC LIMIT 1) UNION ALL SELECT * FROM (SELECT timestamp_sec FROM ongoing_journey ORDER BY id DESC LIMIT 1);")?;
-        let mut results = query.query_map((), |row| {
-            // `timestamp_sec` cannot be null
-            let timestamp_sec: i64 = row.get(0)?;
-            Ok(timestamp_sec)
-        })?;
+        let mut results = query
+            .query_map((), |row| {
+                // `timestamp_sec` cannot be null
+                let timestamp_sec: i64 = row.get(0)?;
+                Ok(timestamp_sec)
+            })
+            .context("get_ongoing_journey_timestamp_range")?;
 
         match results.next() {
             None => Ok(None),
@@ -130,6 +170,7 @@ impl Txn<'_> {
         }
     }
 
+    #[auto_context]
     pub fn delete_all_journeys(&mut self) -> Result<()> {
         info!("Deleting all journeys");
         self.db_txn.execute("DELETE FROM journey;", ())?;
@@ -137,21 +178,28 @@ impl Txn<'_> {
         Ok(())
     }
 
+    #[auto_context]
     pub fn delete_journey(&mut self, id: &str) -> Result<()> {
         info!("Deleting journey: id={id}");
+        let header = self
+            .get_journey_header(id)?
+            .ok_or_else(|| anyhow!("Failed to find journey with id = {id}"))?;
         let changes = self
             .db_txn
             .execute("DELETE FROM journey WHERE id = ?1;", (id,))?;
-        self.action = Some(Action::CompleteRebuilt);
-        if changes == 1 {
-            Ok(())
-        } else {
-            Err(anyhow!("Failed to find journey with id = {}", id))
+        if changes != 1 {
+            return Err(anyhow!("Failed to delete journey with id = {id}"));
         }
+        self.set_invalidate_action(vec![CacheEntry {
+            date: header.journey_date,
+            kind: header.journey_kind,
+        }])?;
+        Ok(())
     }
 
     // TODO: consider return structured result so the caller know if it is skipped or other cases
-    pub fn insert_journey(&mut self, header: JourneyHeader, data: JourneyData) -> Result<()> {
+    #[auto_context]
+    pub fn insert_journey(&mut self, header: JourneyHeader, mut data: JourneyData) -> Result<()> {
         let journey_type = header.journey_type;
         if journey_type != data.type_() {
             bail!("[insert_journey] Mismatch journey type")
@@ -178,7 +226,9 @@ impl Txn<'_> {
             }
         }
 
-        let journey_date = utils::date_to_days_since_epoch(header.journey_date);
+        let insert_date = header.journey_date;
+        let insert_kind = header.journey_kind;
+        let journey_date = utils::date_to_days_since_epoch(insert_date);
         // use start time first, then fallback to endtime
         let timestamp_for_ordering = header.start.or(header.end).map(|x| x.timestamp());
 
@@ -199,17 +249,26 @@ impl Txn<'_> {
             ),
         )?;
 
-        match self.action.get_or_insert(Action::Merge {
-            journey_ids: vec![],
-        }) {
-            Action::Merge { journey_ids } => journey_ids.push(id),
-            Action::CompleteRebuilt => (),
+        if self.action.is_none() {
+            self.action = Some(Action::MergeOne {
+                entry: CacheEntry {
+                    date: insert_date,
+                    kind: insert_kind,
+                },
+                data,
+            });
+        } else {
+            self.set_invalidate_action(vec![CacheEntry {
+                date: insert_date,
+                kind: insert_kind,
+            }])?;
         }
 
         Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[auto_context]
     pub fn create_and_insert_journey(
         &mut self,
         journey_date: NaiveDate,
@@ -250,6 +309,7 @@ impl Txn<'_> {
         Ok(id)
     }
 
+    #[auto_context]
     pub fn update_journey_metadata(
         &mut self,
         id: &str,
@@ -263,7 +323,7 @@ impl Txn<'_> {
 
         let mut header = self
             .get_journey_header(id)?
-            .ok_or_else(|| anyhow!("Updating non existent journey, journey id = {}", id))?;
+            .ok_or_else(|| anyhow!("Updating non existent journey, journey id = {id}"))?;
 
         // must change during update
         header.updated_at = Some(Utc::now());
@@ -288,31 +348,49 @@ impl Txn<'_> {
         )?;
 
         if old_journey_date != new_journey_date || old_journey_kind != new_journey_kind {
-            self.action = Some(Action::CompleteRebuilt);
+            self.set_invalidate_action(vec![
+                CacheEntry {
+                    date: old_journey_date,
+                    kind: old_journey_kind,
+                },
+                CacheEntry {
+                    date: new_journey_date,
+                    kind: new_journey_kind,
+                },
+            ])?;
         }
 
         Ok(())
     }
 
-    pub fn update_journey_data(
+    #[auto_context]
+    pub fn update_journey_data_with_latest_postprocessor(
         &mut self,
         id: &str,
         journey_data: JourneyData,
-        postprocessor_algo: Option<String>,
     ) -> Result<()> {
         info!("Updating journey data with ID {}", &id);
 
         let mut header = self
             .get_journey_header(id)?
-            .ok_or_else(|| anyhow!("Updating non existent journey, journey id = {}", id))?;
+            .ok_or_else(|| anyhow!("Updating non existent journey, journey id = {id}"))?;
 
-        header.postprocessor_algo = postprocessor_algo;
+        let (mut journey_data, algo) = match journey_data {
+            JourneyData::Bitmap(bitmap) => (JourneyData::Bitmap(bitmap), None),
+            JourneyData::Vector(vector) => (
+                JourneyData::Vector(GpsPostprocessor::process(vector)),
+                Some(GpsPostprocessor::current_algo()),
+            ),
+        };
+        header.postprocessor_algo = algo;
 
         // must change during update
         header.updated_at = Some(Utc::now());
         header.revision = generate_random_revision();
         header.journey_type = journey_data.type_();
 
+        let journey_date = header.journey_date;
+        let journey_kind = header.journey_kind;
         let header_bytes = header.to_proto().write_to_bytes()?;
         let mut data_bytes = Vec::new();
         journey_data.serialize(&mut data_bytes)?;
@@ -323,30 +401,30 @@ impl Txn<'_> {
             (&id, journey_data.type_().to_int(), header_bytes, data_bytes),
         )?;
 
-        self.action = Some(Action::CompleteRebuilt);
+        self.set_invalidate_action(vec![CacheEntry {
+            date: journey_date,
+            kind: journey_kind,
+        }])?;
         Ok(())
     }
 
+    #[auto_context]
     pub fn finalize_ongoing_journey(&mut self) -> Result<bool> {
-        let new_journey_added = match self.get_ongoing_journey()? {
+        let mut journey_date_picker = JourneyDatePicker::new();
+        let new_journey_added = match self.get_ongoing_journey(Some(&mut journey_date_picker))? {
             None => false,
-            Some(OngoingJourney {
-                start,
-                end,
-                journey_vector,
-            }) => {
-                // TODO: we could have some additional post-processing of the track.
-                // including path refinement + lossy compression.
-
+            Some(journey_vector) => {
                 // TODO: allow user to set this when recording?
                 let journey_kind = JourneyKind::DefaultKind;
 
                 self.create_and_insert_journey(
                     // In practice, `end` could never be none but just in case ...
                     // TODO: Maybe we want better journey date strategy
-                    end.unwrap_or(Utc::now()).with_timezone(&Local).date_naive(),
-                    start,
-                    end,
+                    journey_date_picker
+                        .pick_journey_date()
+                        .unwrap_or_else(|| Local::now().date_naive()),
+                    journey_date_picker.min_time(),
+                    journey_date_picker.max_time(),
                     None,
                     journey_kind,
                     None,
@@ -370,6 +448,7 @@ impl Txn<'_> {
     // `JourneyHeader` in memory might be a little bit too much.
     // Actually, header is pretty small so it should be fine but still an iterator
     // would be better. Frontend should always use ranged query.
+    #[auto_context]
     pub fn query_journeys(
         &self,
         from_date_inclusive: Option<NaiveDate>,
@@ -415,7 +494,8 @@ impl Txn<'_> {
                 let header_bytes = row.get_ref(0)?.as_blob()?;
                 Ok(protos::journey::Header::parse_from_bytes(header_bytes))
             })
-            .optional()?;
+            .optional()
+            .context("get_journey_header")?;
 
         match header_proto_result {
             Some(header_proto_result) => {
@@ -431,17 +511,20 @@ impl Txn<'_> {
             .db_txn
             .prepare("SELECT type, data FROM journey WHERE id = ?1;")?;
 
-        query.query_row([id], |row| {
-            let type_ = row.get_ref(0)?.as_i64()?;
-            let f = || {
-                let journey_type = JourneyType::of_int(i8::try_from(type_)?)?;
-                let data = row.get_ref(1)?.as_blob()?;
-                JourneyData::deserialize(data, journey_type)
-            };
-            Ok(f())
-        })?
+        query
+            .query_row([id], |row| {
+                let type_ = row.get_ref(0)?.as_i64()?;
+                let f = || {
+                    let journey_type = JourneyType::of_int(i8::try_from(type_)?)?;
+                    let data = row.get_ref(1)?.as_blob()?;
+                    JourneyData::deserialize(data, journey_type, false)
+                };
+                Ok(f())
+            })
+            .context("get_journey_data")?
     }
 
+    #[auto_context]
     pub fn years_with_journey(&self) -> Result<Vec<i32>> {
         let mut query = self
             .db_txn
@@ -453,6 +536,7 @@ impl Txn<'_> {
         Ok(years)
     }
 
+    #[auto_context]
     pub fn months_with_journey(&self, year: i32) -> Result<Vec<i32>> {
         let mut query = self
             .db_txn
@@ -464,6 +548,7 @@ impl Txn<'_> {
         Ok(months)
     }
 
+    #[auto_context]
     pub fn days_with_journey(&self, year: i32, month: i32) -> Result<Vec<i32>> {
         let mut query = self
             .db_txn
@@ -476,33 +561,36 @@ impl Txn<'_> {
     }
 
     // TODO: consider moving this to `storage.rs`
-    pub fn try_auto_finalize_journy(&mut self) -> Result<bool> {
+    #[auto_context]
+    pub fn try_auto_finalize_journey(&mut self) -> Result<bool> {
         match self.get_ongoing_journey_timestamp_range()? {
             None => Ok(false),
             Some((start, end)) => {
                 // NOTE: this logic is not called very frequently
 
                 let now = Local::now();
-                let recording_length_hour = (end.timestamp() - start.timestamp()) / 60 / 60;
-                let required_gap_mins = if recording_length_hour >= 72 {
+                let recording_length_hours = (now.timestamp() - start.timestamp()) / 60 / 60;
+                let required_gap_mins = if recording_length_hours >= 48 {
                     0 // let's just finalize it
-                } else if recording_length_hour >= 48 {
+                } else if recording_length_hours >= 24 {
                     2
-                } else if recording_length_hour >= 24 {
-                    5
                 } else {
                     // if the local date changed since start, we should try to finalize it, otherwise we don't want that unless there is a huge gap (6h)
-                    if start.with_timezone(&Local).date_naive() != now.date_naive() {
-                        15
-                    } else {
+                    if start.with_timezone(&Local).date_naive() == now.date_naive() {
                         6 * 60
+                    } else if now.hour() <= 4 || recording_length_hours <= 8 {
+                        20
+                    } else {
+                        5
                     }
                 };
 
-                let try_finalize = (now.timestamp() - end.timestamp()) / 60 >= required_gap_mins;
+                let gap_mins = (now.timestamp() - end.timestamp()).max(0) / 60;
+
+                let try_finalize = gap_mins >= required_gap_mins;
 
                 info!(
-                    "Auto finalize ongoing journey: start={start}, end={end}, now={now}, try_finalize={try_finalize}"
+                    "Auto finalize ongoing journey: recording_length_hours={recording_length_hours}, gap_mins={gap_mins}, required_gap_mins={required_gap_mins}, try_finalize={try_finalize}"
                 );
                 if try_finalize {
                     self.finalize_ongoing_journey()
@@ -517,9 +605,28 @@ impl Txn<'_> {
         let mut query = self
             .db_txn
             .prepare("SELECT journey_date FROM journey ORDER BY journey_date LIMIT 1;")?;
-        Ok(query
+        query
             .query_row((), |row| Ok(utils::date_of_days_since_epoch(row.get(0)?)))
-            .optional()?)
+            .optional()
+            .context("earliest_journey_date")
+    }
+
+    pub fn journey_date_range(&self) -> Result<Option<(NaiveDate, NaiveDate)>> {
+        let mut query = self
+            .db_txn
+            .prepare("SELECT MIN(journey_date), MAX(journey_date) FROM journey;")?;
+        query
+            .query_row((), |row| {
+                let min: Option<i32> = row.get(0)?;
+                let max: Option<i32> = row.get(1)?;
+                Ok(min.zip(max).map(|(min, max)| {
+                    (
+                        utils::date_of_days_since_epoch(min),
+                        utils::date_of_days_since_epoch(max),
+                    )
+                }))
+            })
+            .context("journey_date_range")
     }
 
     pub fn require_optimization(&self) -> Result<bool> {
@@ -533,6 +640,7 @@ impl Txn<'_> {
         Ok(result)
     }
 
+    #[auto_context]
     pub fn optimize(&mut self) -> Result<()> {
         info!("Start optimizing main DB.");
         let journey_headers = self.query_journeys(None, None)?;
@@ -542,10 +650,9 @@ impl Txn<'_> {
                     JourneyData::Bitmap(_) => (),
                     JourneyData::Vector(journey_vector) => {
                         let journey_vector = GpsPostprocessor::process(journey_vector);
-                        self.update_journey_data(
+                        self.update_journey_data_with_latest_postprocessor(
                             &journey_header.id,
                             JourneyData::Vector(journey_vector),
-                            Some(GpsPostprocessor::current_algo()),
                         )?;
                     }
                 }
@@ -558,12 +665,6 @@ impl Txn<'_> {
 
 pub struct MainDb {
     conn: Connection,
-}
-
-pub struct OngoingJourney {
-    pub start: Option<DateTime<Utc>>,
-    pub end: Option<DateTime<Utc>>,
-    pub journey_vector: JourneyVector,
 }
 
 impl MainDb {
@@ -614,6 +715,7 @@ impl MainDb {
         MainDb { conn }
     }
 
+    #[auto_context]
     pub fn with_txn<F, O>(&mut self, f: F) -> Result<O>
     where
         F: FnOnce(&mut Txn) -> Result<O>,
@@ -627,6 +729,7 @@ impl MainDb {
         Ok(output)
     }
 
+    #[auto_context]
     pub fn flush(&self) -> Result<()> {
         self.conn.cache_flush()?;
         Ok(())
@@ -637,6 +740,7 @@ impl MainDb {
       `cache_db` can be put outside `Txn`. Be extra careful.
     */
 
+    #[auto_context]
     fn append_ongoing_journey(
         &mut self,
         raw_data: &gps_processor::RawData,
@@ -656,6 +760,7 @@ impl MainDb {
         Ok(())
     }
 
+    #[auto_context]
     pub fn record(
         &mut self,
         raw_data: &gps_processor::RawData,
@@ -670,6 +775,7 @@ impl MainDb {
         Ok(())
     }
 
+    #[auto_context]
     fn get_setting<T: FromStr>(&mut self, setting: Setting) -> Result<Option<T>>
     where
         <T as FromStr>::Err: Error + Send + Sync + 'static,
@@ -702,6 +808,7 @@ impl MainDb {
         .unwrap_or(default)
     }
 
+    #[auto_context]
     pub fn set_setting<T: ToString>(&mut self, setting: Setting, value: T) -> Result<()> {
         let tx = self.conn.transaction()?;
         let sql = "INSERT OR REPLACE INTO setting (key, value) VALUES (?1, ?2);";
@@ -713,7 +820,7 @@ impl MainDb {
 
 #[derive(Debug, Clone, Copy)]
 pub enum Setting {
-    // TODO: We should consider making the fultter part handle this, similar to
+    // TODO: We should consider making the flutter part handle this, similar to
     // `GpsManager.isRecording`.
     RawDataMode,
 }

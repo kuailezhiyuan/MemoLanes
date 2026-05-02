@@ -1,13 +1,16 @@
+use flutter_rust_bridge::frb;
 use journey_kernel::TileBuffer;
 
 use crate::journey_area_utils;
-use crate::journey_bitmap::JourneyBitmap;
+use crate::journey_bitmap::{JourneyBitmap, TileKey};
 use crate::renderer::tile_shader2::TileShader2;
 use std::collections::HashMap;
+
+#[frb(ignore)]
 pub struct MapRenderer {
     journey_bitmap: JourneyBitmap,
     /* for each tile of 512*512 tiles in a JourneyBitmap, use buffered area to record any update */
-    tile_area_cache: HashMap<(u16, u16), f64>,
+    tile_area_cache: HashMap<TileKey, f64>,
     version: u64,
     current_area: Option<u64>,
 }
@@ -22,14 +25,23 @@ impl MapRenderer {
         }
     }
 
-    pub fn update<F>(&mut self, f: F)
+    pub fn update<F>(&mut self, mut f: F)
     where
-        F: Fn(&mut JourneyBitmap, &mut dyn FnMut((u16, u16))),
+        F: FnMut(&mut JourneyBitmap, &mut dyn FnMut(TileKey)),
     {
-        let mut tile_changed = |tile_pos: (u16, u16)| {
-            self.tile_area_cache.remove(&tile_pos);
+        // Collect changed tile positions first
+        let mut changed_tiles = Vec::new();
+        let mut tile_changed = |tile_pos: TileKey| {
+            changed_tiles.push(tile_pos);
         };
+
+        // Apply the update function
         f(&mut self.journey_bitmap, &mut tile_changed);
+
+        for tile_pos in changed_tiles {
+            self.tile_area_cache.remove(&tile_pos);
+        }
+
         // TODO: we should improve the cache invalidation rule
         self.reset();
     }
@@ -50,7 +62,7 @@ impl MapRenderer {
     }
 
     pub fn get_version_string(&self) -> String {
-        format!("\"{:x}\"", self.version)
+        format!("{:x}", self.version)
     }
 
     pub fn parse_version_string(version_str: &str) -> Option<u64> {
@@ -59,6 +71,7 @@ impl MapRenderer {
         u64::from_str_radix(cleaned, 16).ok()
     }
 
+    // TODO: deprecate this method and merge it with `get_tile_buffer`.
     pub fn get_latest_bitmap_if_changed(
         &self,
         client_version: Option<&str>,
@@ -81,11 +94,31 @@ impl MapRenderer {
             )
         })
     }
+
+    pub fn get_tile_buffer(
+        &mut self,
+        x: i64,
+        y: i64,
+        z: i16,
+        width: i64,
+        height: i64,
+        buffer_size_power: i16,
+    ) -> Result<TileBuffer, String> {
+        tile_buffer_from_journey_bitmap(
+            &mut self.journey_bitmap,
+            x,
+            y,
+            z,
+            width,
+            height,
+            buffer_size_power,
+        )
+    }
 }
 
 /// Create a new TileBuffer from a JourneyBitmap for a range of tiles
-pub fn tile_buffer_from_journey_bitmap(
-    journey_bitmap: &JourneyBitmap,
+fn tile_buffer_from_journey_bitmap(
+    journey_bitmap: &mut JourneyBitmap,
     x: i64,
     y: i64,
     z: i16,
