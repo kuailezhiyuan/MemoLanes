@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:memolanes/body/journey/journey_info_page.dart';
 import 'package:memolanes/common/component/tiles/label_tile.dart';
 import 'package:memolanes/common/component/tiles/label_tile_content.dart';
+import 'package:memolanes/common/app_haptics.dart';
 import 'package:memolanes/constants/index.dart';
 import 'package:memolanes/src/rust/api/api.dart' as api;
 import 'package:memolanes/src/rust/api/utils.dart';
@@ -19,6 +20,12 @@ class JourneyBody extends StatefulWidget {
 }
 
 class _JourneyBodyState extends State<JourneyBody> {
+  static const _landscapeContentPadding = 16.0;
+  static const _landscapeColumnGap = 16.0;
+  static const _landscapeCalendarMinWidth = 320.0;
+  static const _landscapeCalendarMaxWidth = 360.0;
+  static const _landscapeListMinWidth = 280.0;
+
   List<JourneyHeader> _journeyHeaderList = [];
 
   DateTime _selectedDate = DateTime.now();
@@ -48,6 +55,7 @@ class _JourneyBodyState extends State<JourneyBody> {
         await api.monthsWithJourney(year: _selectedDate.year);
     _daysWithJourneyList = await api.daysWithJourney(
         year: _selectedDate.year, month: _selectedDate.month);
+    if (!mounted) return;
     setState(() {
       _isLoadingFirstDate = false;
     });
@@ -58,6 +66,7 @@ class _JourneyBodyState extends State<JourneyBody> {
         year: _selectedDate.year,
         month: _selectedDate.month,
         day: _selectedDate.day);
+    if (!mounted) return;
     setState(() {
       _journeyHeaderList = journeyHeaderList.reversed.toList();
     });
@@ -131,15 +140,22 @@ class _JourneyBodyState extends State<JourneyBody> {
           const TextStyle(color: Colors.grey, fontWeight: FontWeight.w400),
       disabledYearTextStyle:
           const TextStyle(color: Colors.grey, fontWeight: FontWeight.w400),
+      // Turn off CalendarDatePicker2's own vibration; it varies by platform.
+      // We call AppHaptics on date/month changes instead.
+      // TODO: Fix CalendarDatePicker2's built-in vibration being inconsistent
+      //       across platforms (local patch or upstream), so we can rely on it.
+      disableVibration: true,
     );
     return CalendarDatePicker2(
       config: config,
       value: [_selectedDate],
       onValueChanged: (dates) {
+        AppHaptics.selection();
         setState(() => _selectedDate = dates.first);
         _updateJourneyHeaderList();
       },
       onDisplayedMonthChanged: (value) async {
+        AppHaptics.selection();
         DateTime jumpToDate =
             DateTime(value.year, value.month, _selectedDate.day);
         DateTime jumpToDateMonthLastDay =
@@ -160,6 +176,7 @@ class _JourneyBodyState extends State<JourneyBody> {
 
         _daysWithJourneyList = await api.daysWithJourney(
             month: jumpToDate.month, year: jumpToDate.year);
+        if (!mounted) return;
         setState(() {
           _selectedDate = jumpToDate;
         });
@@ -169,42 +186,80 @@ class _JourneyBodyState extends State<JourneyBody> {
   }
 
   Widget _buildJourneyHeaderList() {
-    return Expanded(
-      child: ListView.builder(
-        padding: EdgeInsets.only(
-          bottom: MediaQuery.of(context).padding.bottom +
-              StyleConstants.navBarSafeArea +
-              5,
-        ),
-        itemCount: _journeyHeaderList.length,
-        itemBuilder: (context, index) {
-          return LabelTile(
-            label: _journeyHeaderList[index].start != null
-                ? DateFormat("yyyy-MM-dd HH:mm:ss")
-                    .format(_journeyHeaderList[index].start!.toLocal())
-                : naiveDateToString(
-                    date: _journeyHeaderList[index].journeyDate),
-            trailing: LabelTileContent(showArrow: true),
-            onTap: () {
-              navigatorPush(
-                context,
-                page: JourneyInfoPage(
-                  journeyHeader: _journeyHeaderList[index],
-                ),
-              ).then((refresh) async {
-                if (refresh != null && refresh) {
-                  _yearsWithJourneyList = await api.yearsWithJourney();
-                  _monthsWithJourneyList =
-                      await api.monthsWithJourney(year: _selectedDate.year);
-                  _daysWithJourneyList = await api.daysWithJourney(
-                      year: _selectedDate.year, month: _selectedDate.month);
-                  _updateJourneyHeaderList();
-                }
-              });
-            },
-          );
-        },
+    return ListView.builder(
+      padding: EdgeInsets.only(
+        bottom: StyleConstants.navBarSafeArea + 5,
       ),
+      itemCount: _journeyHeaderList.length,
+      itemBuilder: (context, index) {
+        return LabelTile(
+          label: _journeyHeaderList[index].start != null
+              ? DateFormat("yyyy-MM-dd HH:mm:ss")
+                  .format(_journeyHeaderList[index].start!.toLocal())
+              : naiveDateToString(date: _journeyHeaderList[index].journeyDate),
+          trailing: LabelTileContent(showArrow: true),
+          onTap: () {
+            navigatorPush(
+              context,
+              page: JourneyInfoPage(
+                journeyHeader: _journeyHeaderList[index],
+              ),
+            ).then((refresh) async {
+              if (refresh != null && refresh) {
+                _yearsWithJourneyList = await api.yearsWithJourney();
+                _monthsWithJourneyList =
+                    await api.monthsWithJourney(year: _selectedDate.year);
+                _daysWithJourneyList = await api.daysWithJourney(
+                    year: _selectedDate.year, month: _selectedDate.month);
+                if (!mounted) return;
+                _updateJourneyHeaderList();
+              }
+            });
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildLandscapeBody(DateTime firstDate) {
+    const bottomPadding = StyleConstants.navBarSafeArea + 5;
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final availableWidth = constraints.maxWidth -
+            _landscapeContentPadding * 2 -
+            _landscapeColumnGap;
+        final preferredCalendarWidth = availableWidth * 0.42;
+        final maxCalendarWidth = (availableWidth - _landscapeListMinWidth)
+            .clamp(0.0, _landscapeCalendarMaxWidth)
+            .toDouble();
+        final minCalendarWidth = maxCalendarWidth < _landscapeCalendarMinWidth
+            ? maxCalendarWidth
+            : _landscapeCalendarMinWidth;
+        final calendarWidth = preferredCalendarWidth
+            .clamp(minCalendarWidth, maxCalendarWidth)
+            .toDouble();
+
+        return Padding(
+          padding: const EdgeInsets.all(_landscapeContentPadding),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SizedBox(
+                width: calendarWidth,
+                child: SingleChildScrollView(
+                  padding: EdgeInsets.only(bottom: bottomPadding),
+                  child: _buildDatePickerWithValue(firstDate),
+                ),
+              ),
+              const SizedBox(width: _landscapeColumnGap),
+              Expanded(
+                child: _buildJourneyHeaderList(),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -217,12 +272,17 @@ class _JourneyBodyState extends State<JourneyBody> {
     if (firstDate == null) {
       return Center(child: Text(context.tr("journey.no_data")));
     } else {
+      final isLandscape =
+          MediaQuery.of(context).orientation == Orientation.landscape;
+      if (isLandscape) {
+        return _buildLandscapeBody(firstDate);
+      }
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _buildDatePickerWithValue(firstDate),
           const SizedBox(height: 16.0),
-          _buildJourneyHeaderList(),
+          Expanded(child: _buildJourneyHeaderList()),
         ],
       );
     }

@@ -8,7 +8,7 @@ fn tile_buffer_creation_benchmarks(c: &mut Criterion) {
     group.sample_size(10); // Lower sample size as this is more expensive
 
     let (bitmap_data, _warnings) =
-        import_data::load_fow_sync_data("./tests/data/fow_3.zip").unwrap();
+        import_data::fow::load_fow_sync_data("./tests/data/fow_3.zip").unwrap();
 
     let mut map_renderer = map_renderer::MapRenderer::new(bitmap_data);
 
@@ -43,9 +43,9 @@ fn tile_buffer_creation_benchmarks(c: &mut Criterion) {
                     b.iter(|| {
                         std::hint::black_box(
                             map_renderer
-                                .get_tile_buffer(
-                                    *tile_x, // use calculated x coordinate
-                                    *tile_y, // use calculated y coordinate
+                                .get_tile_range_response(
+                                    *tile_x,
+                                    *tile_y,
                                     **zoom,
                                     *width,
                                     *height,

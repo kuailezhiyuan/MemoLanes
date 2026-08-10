@@ -1,0 +1,213 @@
+# geo_rasterizer
+
+Offline build tool. Converts Natural Earth GeoJSON into the geo-reference data
+shipped in `app/assets/geo/`:
+
+- `geo_data_<worldview>.bin` — the packed entity/tile data (one per worldview).
+- `region_names.<locale>.json` — the localized region-name maps (one per
+  locale), resolved from Unicode CLDR (see "Region names" below).
+
+Run via the `app/` Justfile (`just rasterize-geo`); it is not part of the app at
+runtime. Both outputs are git-ignored and reproducible from the pinned source.
+
+Two files in this crate are **hand-curated state**, committed as source of truth:
+`geo_entity_registry.toml` (frozen ids) and `geo_names_overrides.toml` (name
+overrides). This README covers the registry first, then names.
+
+## What `geo_entity_registry.toml` is
+
+It is the **frozen, append-only id registry** for geo entities. It assigns every
+entity a small, permanent integer id:
+
+- **continents** — keyed by continent code
+- **countries** — keyed by [ADM0_A3](https://en.wikipedia.org/wiki/ISO_3166-1_alpha-3)
+  country code (the `ADM0_A3` field in the Natural Earth source)
+
+Each **country** entry also stores a `point` — a `[lon, lat]` representative
+point (the entity's **union centroid**: its geometry merged across every
+worldview), rounded to 4 decimals. It is informational, not a gate — it makes the
+committed registry diff carry an identity signal (see [below](#why-it-exists)).
+Continents carry no `point` — a continent's identity is its code.
+
+Top level:
+
+- `schema` — format version (currently `1`).
+
+```toml
+# Country: id + representative point.
+[[country]]
+code = "ARG"
+id = 7
+point = [-65.1731, -35.3787]
+
+# Continent: identity is the code, so no point.
+[[continent]]
+code = "SA"
+id = 3
+```
+
+Entries are sorted by `code` and points rounded to 4 dp; `id` is always an
+explicit field, so sorting never changes an id. The full schema lives in the
+`Registry` / `Entry` types in [`src/registry.rs`](src/registry.rs).
+
+Unlike the generated `geo_data_*.bin` files and the downloaded
+`natural_earth/*.geojson` sources (both git-ignored), **this TOML is committed**
+— it is the source of truth.
+
+## Why it exists
+
+The `geo_data_*.bin` files refer to entities by these integer ids, not by name
+or code, to stay compact. For that to be safe, **an id must mean the same place
+forever**:
+
+- **Stable across source bumps.** When the pinned Natural Earth data is updated,
+  a country keeps the id it already had — existing bins and any persisted data
+  stay valid.
+- **Shared across worldviews (worldviews).** The `iso`, `chn`, and `usa` worldviews disagree
+  on borders, but a given country code resolves to the **same id** in every worldview,
+  so per-worldview bins share one id space.
+
+Identity is **not gated automatically**. Instead, each country's `point` is
+re-baselined to its current union centroid on every regen, and this TOML is
+committed — so a code silently reassigned to a different place shows up as a large
+`point` move in the registry diff of the source-bump PR. The CI guardrail
+(`git diff --exit-code` on this file, run after `registry-gen`) forces that diff
+to be regenerated and reviewed; a reviewer scans it for a gross jump. Rounding to
+~11 m keeps benign coastline refinement out of the diff, so only real movement
+shows. A border move barely nudges the centroid; a reassignment to another place
+moves it tens of degrees.
+
+`assemble_entities` still hard-fails on any source code missing from the registry
+(the unknown-code gate) — that is the correctness-critical check and the one thing
+that *is* enforced automatically.
+
+The generator is **append-only**: it only ever *adds* ids for codes it has never
+seen. It never renumbers or removes existing ids.
+
+## How to update it
+
+Update the registry whenever a new or changed source introduces a country code
+the registry has not seen yet (e.g. bumping the Natural Earth pin in
+`app/rust/geo_data_format/src/worldview.rs`, or adding a worldview).
+
+From the `app/` directory:
+
+```bash
+just registry-gen     # union over every shipped worldview (Worldview::ALL); downloads
+                      # the pinned sources if missing, then rewrites the TOML
+```
+
+`just rasterize-geo` depends on `registry-gen`, so the registry is always
+brought up to date before any worldview is rasterized — you normally don't need to run
+it by hand.
+
+Then **commit the updated `geo_entity_registry.toml` in the same PR** as the
+source/worldview change. Because generation is append-only, the only change should be
+newly appended ids; existing ids must not move.
+
+### Direct invocation
+
+```bash
+# From this crate dir. No args = union over Worldview::ALL (same as `just registry-gen`).
+cargo run --release --bin registry_gen
+
+# Register one specific file under one worldview (paths are repo-relative, POSIX):
+cargo run --release --bin registry_gen -- --source iso:natural_earth/<file>.geojson
+```
+
+## CI guardrail
+
+CI runs `just rasterize-geo` (which regenerates the registry) and then checks:
+
+```bash
+git diff --exit-code tools/geo_rasterizer/geo_entity_registry.toml
+```
+
+A non-empty diff fails the build — meaning a source/worldview bump was made without
+regenerating and committing the registry. So forgetting this step is caught
+automatically rather than silently shipping stale ids.
+
+## Region names (`geo_names_overrides.toml`)
+
+Each entity carries its display name as an l10n *key*, not a string — `entities.rs`
+mints `country.<ADM0_A3>` / `continent.<code>` into the `.bin`. The
+rasterizer resolves those keys to display strings and writes one
+`region_names.<locale>.json` per locale (`app/assets/geo/`), nested like the UI
+translation files (`{"country": {"CHN": …}}`), which the app merges
+into easy_localization via a custom `AssetLoader` — so a region name resolves
+through the same `.tr()` path as every other string (see
+`app/lib/common/app_translation_loader.dart`, `RegionEntity.displayName`).
+
+The app never sees a name key as a bare `String`: `RegionEntity.nameKey` is a
+`RegionNameKey` wrapper, so `entity.nameKey.tr()` doesn't compile. That forces
+resolution through `RegionEntity.displayName(worldviewId)`, the one place that
+unwraps `.value` and prefers a worldview-scoped override — a raw `.tr()` would
+silently skip it.
+
+Resolution per name, in order:
+
+1. worldview-scoped override → a `<worldview>.<name_key>` key (see below),
+2. worldview-agnostic override,
+3. the CLDR territory name for the group's sovereign member's `ISO_A2_EH`,
+4. hard error — never a silent English fallback.
+
+**Names come from CLDR, not Natural Earth.** Unicode CLDR
+(`cldr-localenames-full`, pinned in `geo_data_format::cldr`) is the canonical,
+per-locale authority for territory names, keyed by ISO 3166-1 alpha-2. Natural
+Earth supplies only the geometry and the `ISO_A2_EH` code that joins a feature to
+its CLDR name. A CLDR name depends on the alpha-2 alone, so a country resolves to
+the same name across every worldview by construction — the map is keyed by
+`name_key`, unioned across worldviews, and a given `ADM0_A3` must carry the same
+`ISO_A2_EH` in every worldview (generation fails otherwise).
+
+**Collision gate.** Natural Earth stamps some sub-features (disputed regions,
+sovereign bases, outlying islands) with their *sovereign's* `ISO_A2_EH`, so CLDR
+would name each after its sovereign — two distinct regions both reading
+"Georgia". Generation requires at most one CLDR-resolved entity per alpha-2; the
+sub-features must carry an override, or the build fails listing the collision.
+The coverage gate can't catch this (the name is non-empty), so this gate does.
+
+`geo_names_overrides.toml` is the only hand-authored part. An override exists
+where CLDR cannot give the name we ship:
+
+- **No CLDR territory / no alpha-2.** Continents are synthesized (no feature, so
+  **every** continent name is authored here); NE-only aggregates (the Spratlys)
+  and `-99`-sentinel entities (Bir Tawil, the Cyprus base areas) have no CLDR
+  entry.
+- **Sub-feature sharing a sovereign's alpha-2** (see the collision gate) —
+  Abkhazia, South Ossetia, Clipperton Island, ….
+- **CLDR's name is not the form we ship** — e.g. CLDR's verbose "Hong Kong SAR
+  China" shortened to "Hong Kong".
+
+A key is a locale string; a per-worldview override is a sub-table:
+
+```toml
+["country.HKG"]        # default: every worldview
+en-US = "Hong Kong"
+
+["country.AAA".chn]    # chn worldview only; emitted as `chn.country.AAA`
+zh-CN = "…"
+```
+
+### Regenerating after an overrides edit
+
+`just rasterize-geo` — the names pass always reruns and picks up the edit (the
+`.bin`s hash `geojson + registry`, not the overrides, so they skip; CLDR sources
+are downloaded on demand and verified against the pin, same as the geojson).
+Generation reports every unresolved gap and every alpha-2 collision in one run,
+so overrides can be authored in one pass. Then `just test-geo` runs the coverage
+gate (`tests/names_coverage.rs`): every entity in every worldview must resolve to
+a non-empty name in every locale. Commit only the `.toml` — the JSON are
+git-ignored build artifacts.
+
+## Future work
+
+- **Per-worldview names (admin-1).** The worldview-scoped override path
+  (`["…".<worldview>]` → a `<worldview>.<name_key>` key the app prefers) is
+  implemented but **unused** — no admin-0 name differs by worldview. It exists for
+  future admin-1 states/provinces, where a disputed region legitimately has a
+  different name per political view (e.g. Arunachal Pradesh vs 藏南 in the chn
+  worldview). Natural Earth has no POV variant of admin-1, so such names would be
+  hand-authored here as worldview overrides. Admin-1 also needs per-worldview
+  parenting reconciliation (which province belongs to which country per worldview),
+  which the country-level `absorb` mechanism only hints at.

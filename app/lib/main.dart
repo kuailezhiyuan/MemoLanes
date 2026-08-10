@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
@@ -10,47 +11,49 @@ import 'package:memolanes/body/achievement/achievement_body.dart'
     deferred as achievement;
 import 'package:memolanes/body/journey/journey_body.dart' deferred as journey;
 import 'package:memolanes/body/map/map_body.dart';
-import 'package:memolanes/body/privacy_agreement.dart';
+import 'package:memolanes/body/first_launch_setup.dart';
 import 'package:memolanes/body/settings/settings_body.dart'
     deferred as settings;
+import 'package:memolanes/common/achievement_stats_store.dart';
+import 'package:memolanes/common/app_translation_loader.dart';
 import 'package:memolanes/common/component/bottom_nav_bar.dart';
+import 'package:memolanes/common/component/database_version_too_new_gate.dart';
+import 'package:memolanes/common/component/map_controls/map_copyright_button.dart';
 import 'package:memolanes/common/component/safe_area_wrapper.dart';
 import 'package:memolanes/common/gps_manager.dart';
 import 'package:memolanes/common/log.dart';
+import 'package:memolanes/common/map_style.dart';
+import 'package:memolanes/common/mmkv_util.dart';
+import 'package:memolanes/utils/nav_helper.dart';
 import 'package:memolanes/common/update_notifier.dart';
 import 'package:memolanes/common/utils.dart';
 import 'package:memolanes/common/loading_manager.dart';
 import 'package:memolanes/constants/index.dart';
 import 'package:provider/provider.dart';
 
-GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
-
 void main() async {
   runZonedGuarded(() async {
-    await AppBootstrap.initAppRuntime();
+    final startupStatus = await AppBootstrap.initAppRuntime();
+    if (startupStatus == AppStartupStatus.databaseVersionTooNew) {
+      runApp(_appRoot(const MyApp(home: DatabaseVersionTooNewGate())));
+      return;
+    }
 
     final gpsManager = GpsManager();
     final updateNotifier = UpdateNotifier();
+    final achievementStatsStore = AchievementStatsStore();
 
-    runApp(
-      EasyLocalization(
-        supportedLocales: const [
-          Locale('en', 'US'),
-          Locale('zh', 'CN'),
+    runApp(_appRoot(
+      MultiProvider(
+        providers: [
+          // Do NOT use `create: (_) => gpsManager` here
+          ChangeNotifierProvider.value(value: gpsManager),
+          ChangeNotifierProvider.value(value: updateNotifier),
+          ChangeNotifierProvider.value(value: achievementStatsStore),
         ],
-        path: 'assets/translations',
-        fallbackLocale: const Locale('en', 'US'),
-        saveLocale: false,
-        child: MultiProvider(
-          providers: [
-            // Do NOT use `create: (_) => gpsManager` here
-            ChangeNotifierProvider.value(value: gpsManager),
-            ChangeNotifierProvider.value(value: updateNotifier),
-          ],
-          child: const MyApp(),
-        ),
+        child: const MyApp(),
       ),
-    );
+    ));
 
     AppBootstrap.startAppServices(
       gpsManager: gpsManager,
@@ -61,8 +64,21 @@ void main() async {
   });
 }
 
+Widget _appRoot(Widget child) {
+  return EasyLocalization(
+    supportedLocales: const [Locale('en', 'US'), Locale('zh', 'CN')],
+    path: 'assets/translations',
+    assetLoader: const AppTranslationLoader(),
+    fallbackLocale: const Locale('en', 'US'),
+    saveLocale: false,
+    child: child,
+  );
+}
+
 class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+  const MyApp({super.key, this.home});
+
+  final Widget? home;
 
   @override
   Widget build(BuildContext context) {
@@ -97,7 +113,7 @@ class MyApp extends StatelessWidget {
           unselectedItemColor: Colors.black54,
         ),
       ),
-      home: const MyHomePage(title: 'MemoLanes [OSS]'),
+      home: home ?? const MyHomePage(title: 'MemoLanes [OSS]'),
     );
   }
 }
@@ -128,15 +144,17 @@ class _MyHomePageState extends State<MyHomePage> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      showPrivacyAgreementIfNeeded(context);
+      await showFirstLaunchSetupIfNeeded(context);
+      if (!context.mounted) return;
 
-      var mainMapReady = AppBootstrap.mainMapReady;
-
+      final mainMapReady = AppBootstrap.mainMapReady;
       if (!mainMapReady.isCompleted) {
         await showLoadingDialog(
           asyncTask: mainMapReady.future,
         );
       }
+      if (!context.mounted) return;
+      await tryShowPermissionSheetIfFirstTime();
     });
   }
 
@@ -209,6 +227,15 @@ class _MyHomePageState extends State<MyHomePage> {
 
   @override
   Widget build(BuildContext context) {
+    final mediaQuery = MediaQuery.of(context);
+    final navBarBottomInset = StyleConstants.navBarBottomInset(context);
+    final horizontalSafeArea =
+        math.max(mediaQuery.viewPadding.left, mediaQuery.viewPadding.right);
+    final mapCopyrightTextMarkdown =
+        MapStyle.findById(MMKVUtil.getString(MMKVKey.mapStyle)).copyright;
+    const mapCopyrightNavBarGap = 6.0;
+    const mapCopyrightTrailingGap = 8.0;
+
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (bool didPop, dynamic result) async {
@@ -226,23 +253,39 @@ class _MyHomePageState extends State<MyHomePage> {
               left: 0,
               right: 0,
               bottom: 0,
-              child: SafeArea(
-                child: Padding(
-                  padding: const EdgeInsets.only(
-                    left: StyleConstants.navBarHorizontalPadding,
-                    right: StyleConstants.navBarHorizontalPadding,
-                    bottom: StyleConstants.navBarBottomPadding,
-                  ),
-                  child: BottomNavBar(
-                    selectedIndex: _selectedIndex,
-                    onIndexChanged: (index) =>
-                        setState(() => _selectedIndex = index),
-                    hasUpdateNotification:
-                        context.watch<UpdateNotifier>().hasUpdateNotification,
+              child: Padding(
+                padding: EdgeInsets.only(
+                  left: horizontalSafeArea,
+                  right: horizontalSafeArea,
+                  bottom: navBarBottomInset,
+                ),
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: SizedBox(
+                    width: mediaQuery.size.width -
+                        BottomNavBar.designHorizontalMargin * 2,
+                    height: BottomNavBar.height,
+                    child: BottomNavBar(
+                      selectedIndex: _selectedIndex,
+                      onIndexChanged: (index) =>
+                          setState(() => _selectedIndex = index),
+                      hasUpdateNotification:
+                          context.watch<UpdateNotifier>().hasUpdateNotification,
+                    ),
                   ),
                 ),
               ),
             ),
+            if (_selectedIndex <= 1)
+              Positioned(
+                right: mediaQuery.viewPadding.right + mapCopyrightTrailingGap,
+                bottom: navBarBottomInset +
+                    BottomNavBar.height +
+                    mapCopyrightNavBarGap,
+                child: MapCopyrightButton(
+                  textMarkdown: mapCopyrightTextMarkdown,
+                ),
+              ),
           ],
         ),
       ),

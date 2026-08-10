@@ -1,7 +1,7 @@
 import { tileXYToLngLat } from "./utils";
-import type maplibregl from "maplibre-gl";
+import type * as maplibregl from "maplibre-gl";
 import type { CanvasSource, CanvasSourceSpecification } from "maplibre-gl";
-import type { TileBuffer } from "../../pkg";
+import type { TileBuffer } from "../../pkg/journey_kernel.js";
 import type { JourneyTileProvider } from "../journey-tile-provider";
 import { JOURNEY_LAYER_ID } from "./journey-layer-interface";
 import type { JourneyLayer, RGBAColor } from "./journey-layer-interface";
@@ -66,6 +66,10 @@ export class JourneyCanvasLayer implements JourneyLayer {
       throw new Error("Failed to get 2D context from canvas");
     }
     this.ctx = ctx;
+  }
+
+  setLowPowerMode(_enabled: boolean): void {
+    // Canvas rendering has no separate low-power path.
   }
 
   initialize(): void {
@@ -149,15 +153,14 @@ export class JourneyCanvasLayer implements JourneyLayer {
       for (let y = top; y < bottom; y++) {
         if (y < 0 || y >= n) continue;
 
-        const xNorm = ((x % n) + n) % n;
-
         const dx = (x - left) * tileSize;
         const dy = (y - top) * tileSize;
 
         // Get pixels coordinates from journeyTileProvider
+        // TODO: we need smooth transition when x range jump in the center of the Pacific Ocean.
         const pixelCoords = tileBuffer.get_tile_pixels(
-          BigInt(xNorm),
-          BigInt(y),
+          x,
+          y,
           z,
           bufferSizePower,
         );
@@ -181,9 +184,9 @@ export class JourneyCanvasLayer implements JourneyLayer {
 
     // This is a workaround for a maplibre 5.7.3 bug (or feature).
     //  for a map view of multi-worldview (map wrap arounds and lng may be out of -180 - 180 range),
-    //  it has a strict limit that the centor of the canvas fall into the half-open [-180, 180) range,
-    //  or equivalently, the centor's mercator coordinate x must fall in [0, 1) range.
-    //  but for our codes, in border case, the centor's mercator coordinate x may be 1.
+    //  it has a strict limit that the center of the canvas falls into the half-open [-180, 180) range,
+    //  or equivalently, the center's mercator coordinate x must fall in [0, 1) range.
+    //  but for our code, in a border case, the center's mercator coordinate x may be 1.
     //  so we multiply both left and right x by a number that is close to 1 but smaller than 1
     //  to make it fall into the [0, 1) range.
     // More info can be found at the calling stack referenced below,
@@ -197,8 +200,7 @@ export class JourneyCanvasLayer implements JourneyLayer {
     const sw = tileXYToLngLat(almost(left), bottom, z);
 
     const mainCanvasSource = this.map.getSource(this.sourceId) as
-      | CanvasSource
-      | undefined;
+      CanvasSource | undefined;
     mainCanvasSource?.setCoordinates([
       [nw.lng, nw.lat],
       [ne.lng, ne.lat],

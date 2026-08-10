@@ -3,15 +3,22 @@ import 'package:mmkv/mmkv.dart';
 class MMKVKey {
   static const String isUnexpectedExitNotificationEnabled =
       'isUnexpectedExitNotificationEnabled';
+  static const String hapticsFeedbackEnabled =
+      'Settings.hapticsFeedbackEnabled';
   static const String dbOptimizationCheck = "dbOptimizationCheck";
   static const String mainMapState = "MainMap.mapState";
   static const String isRecording = "GpsManager.isRecording";
   static const String privacyAgreementAccepted = "privacyAgreementAccepted";
+  static const String firstLaunchSetupCompletedVersion =
+      "FirstLaunchSetup.completedVersion";
+  static const String worldviewPreference = "Settings.worldview";
   static const String mapStyle = "mapStyle";
   static const String requestedBatteryOptimization =
       'Permission.requestedBatteryOptimization';
+  static const String requestedLocation = 'Permission.requestedLocation';
   static const String requestedNotification =
       'Permission.requestedNotification';
+  static const String permissionSheetShown = 'Permission.sheetShown';
 }
 
 class MMKVUtil {
@@ -60,5 +67,11 @@ class MMKVUtil {
   /// remove key
   static void removeAppKey(String key) {
     return _mmkv.removeValue(key);
+  }
+
+  /// clear all app keys
+  static void clearAll() {
+    _mmkv.clearAll();
+    _mmkv.sync(true);
   }
 }

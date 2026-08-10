@@ -1,12 +1,8 @@
-import 'dart:io';
-
 import 'package:easy_localization/easy_localization.dart';
 import 'package:memolanes/src/rust/api/utils.dart';
 import 'package:flutter/material.dart';
-import 'package:memolanes/common/component/cards/line_painter.dart';
 import 'package:memolanes/common/component/common_dialog.dart';
 import 'package:memolanes/body/settings/mldx_import_page.dart';
-import 'package:memolanes/common/component/common_export.dart';
 import 'package:memolanes/common/loading_manager.dart';
 import 'package:memolanes/constants/style_constants.dart';
 import 'package:memolanes/src/rust/api/import.dart';
@@ -19,6 +15,19 @@ NaiveDate dateTimeToNaiveDate(DateTime dateTime) =>
 
 DateTime naiveDateToDateTime(NaiveDate naiveDate) =>
     _naiveDateFormat.parse(naiveDateToString(date: naiveDate));
+
+bool popCurrentRoute<T>(BuildContext context, [T? result]) {
+  if (!context.mounted) return false;
+
+  final route = ModalRoute.of(context);
+  if (route?.isCurrent != true) return false;
+
+  final navigator = Navigator.of(context);
+  if (!navigator.canPop()) return false;
+
+  navigator.pop<T>(result);
+  return true;
+}
 
 Future<bool> showCommonDialog(BuildContext context, String message,
     {hasCancel = false,
@@ -75,73 +84,6 @@ Future<T> showLoadingDialog<T>({
     () => asyncTask,
   );
   return result;
-}
-
-Future<bool> showCommonExport(BuildContext context, String filePath,
-    {bool deleteFile = false}) async {
-  final outerSharePositionOrigin = computeSharePositionOrigin(context);
-  final dialogResult = await showDialog<bool>(
-    context: context,
-    barrierDismissible: false,
-    builder: (_) => CommonExport(
-        filePath: filePath, outerSharePositionOrigin: outerSharePositionOrigin),
-  );
-
-  if (deleteFile) {
-    try {
-      final file = File(filePath);
-      if (await file.exists()) {
-        await file.delete();
-      }
-    } catch (e, stack) {
-      debugPrint('Failed to delete file: $e\n$stack');
-    }
-  }
-
-  return dialogResult ?? false;
-}
-
-void showBasicCard(
-  BuildContext context, {
-  required Widget child,
-  bool showHandle = true,
-}) {
-  showModalBottomSheet(
-    context: context,
-    backgroundColor: Colors.transparent,
-    isScrollControlled: true,
-    builder: (context) {
-      return Container(
-        decoration: BoxDecoration(
-          color: Colors.black,
-          borderRadius: BorderRadius.only(
-            topLeft: Radius.circular(16.0),
-            topRight: Radius.circular(16.0),
-          ),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: EdgeInsets.symmetric(vertical: 12.0),
-              child: Offstage(
-                offstage: !showHandle,
-                child: Center(
-                  child: CustomPaint(
-                    size: Size(40.0, 4.0),
-                    painter: LinePainter(
-                      color: const Color(0xFFB5B5B5),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-            child,
-          ],
-        ),
-      );
-    },
-  );
 }
 
 Future<void> importMldx(BuildContext context, String path) async {

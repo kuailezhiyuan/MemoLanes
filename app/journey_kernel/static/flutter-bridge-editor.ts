@@ -1,4 +1,4 @@
-import maplibregl from "maplibre-gl";
+import * as maplibregl from "maplibre-gl";
 import { FlutterBridge } from "./flutter-bridge";
 
 // Declare window extensions for Flutter channels (editor only)
@@ -36,6 +36,7 @@ export class FlutterBridgeEditor {
   initialize(): void {
     this.setupEditorEventListeners();
     this.setupEditorCallableMethods();
+    this.notifyMapZoomChanged();
   }
 
   private isMultiTouch(event: any): boolean {
@@ -308,7 +309,7 @@ export class FlutterBridgeEditor {
       const lngLat = (e as any).lngLat ?? this.map.unproject(e.point);
       const last = this.drawPoints[this.drawPoints.length - 1];
 
-      // TODO: This `eps` is very sus, it compare the lng/lat directly without any transformation.
+      // TODO: This `eps` is very sus, it compares the lng/lat directly without any transformation.
       // Simple sampling guard: only add if moved a bit
       const eps = 1e-6;
       if (

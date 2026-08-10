@@ -9,7 +9,7 @@
  * - Map style management and retry logic
  */
 
-import maplibregl from "maplibre-gl";
+import * as maplibregl from "maplibre-gl";
 import type {
   Map as MaplibreMap,
   RequestTransformFunction,
@@ -29,6 +29,15 @@ import { JourneyTileProvider } from "./journey-tile-provider";
 import { transformStyleWithProjection } from "./utils";
 import { JOURNEY_LAYER_ID } from "./layers/journey-layer-interface";
 import type { JourneyLayer } from "./layers/journey-layer-interface";
+
+const MAX_MAP_ZOOM = 14;
+
+maplibregl.setWorkerUrl(
+  new URL(
+    "maplibre-gl/dist/maplibre-gl-worker.mjs",
+    import.meta.url,
+  ).toString(),
+);
 
 /**
  * Configuration options for MapController
@@ -69,7 +78,20 @@ export class MapController {
       container: config.containerId,
       center: [this.params.lng, this.params.lat],
       zoom: this.params.zoom,
-      maxZoom: 14,
+      bounds: this.params.initialBounds
+        ? [
+            [this.params.initialBounds.west, this.params.initialBounds.south],
+            [this.params.initialBounds.east, this.params.initialBounds.north],
+          ]
+        : undefined,
+      fitBoundsOptions: this.params.initialBounds
+        ? {
+            padding: this.params.initialBoundsPadding,
+            maxZoom: MAX_MAP_ZOOM,
+            duration: 0,
+          }
+        : undefined,
+      maxZoom: MAX_MAP_ZOOM,
       style: {
         version: 8,
         sources: {},
@@ -138,7 +160,7 @@ export class MapController {
         );
 
         // Initial tile buffer load
-        await this.journeyTileProvider.pollForJourneyUpdates(true);
+        await this.journeyTileProvider.waitForTileBufferUpdate();
         console.log("initial tile buffer loaded");
 
         // Register hooks for reactive property changes
@@ -183,10 +205,28 @@ export class MapController {
   }
 
   /**
+   * Get the ReactiveParams instance
+   */
+  getParams(): ReactiveParams {
+    return this.params;
+  }
+
+  /**
    * Get the JourneyTileProvider instance
    */
   getTileProvider(): JourneyTileProvider | null {
     return this.journeyTileProvider;
+  }
+
+  /**
+   * Disable periodic journey-data polling.
+   *
+   * This can be called before initialization to prevent the polling timer from
+   * being created, or afterwards to stop an existing timer.
+   */
+  disableAutoRefresh(): void {
+    this.DisableAutoRefresh = true;
+    this.clearAutoRefreshInterval();
   }
 
   /**
@@ -243,6 +283,7 @@ export class MapController {
       undefined, // use default layerId
       bgColor,
     );
+    newLayer.setLowPowerMode?.(this.params.lowPowerMode);
     newLayer.initialize();
 
     this.currentJourneyLayer = newLayer;
@@ -283,6 +324,11 @@ export class MapController {
             newProjection as ProjectionType,
           ),
       });
+    });
+
+    this.params.on("lowPowerMode", (enabled, _oldValue) => {
+      this.currentJourneyLayer?.setLowPowerMode?.(enabled);
+      this.map.triggerRepaint();
     });
   }
 
@@ -399,14 +445,18 @@ export class MapController {
       clearInterval(this.styleRetryIntervalId);
       this.styleRetryIntervalId = null;
     }
-    if (this.pollIntervalId) {
-      clearInterval(this.pollIntervalId);
-      this.pollIntervalId = null;
-    }
+    this.clearAutoRefreshInterval();
     if (this.currentJourneyLayer) {
       this.currentJourneyLayer.remove();
       this.currentJourneyLayer = null;
     }
     this.map.remove();
+  }
+
+  private clearAutoRefreshInterval(): void {
+    if (this.pollIntervalId !== null) {
+      clearInterval(this.pollIntervalId);
+      this.pollIntervalId = null;
+    }
   }
 }

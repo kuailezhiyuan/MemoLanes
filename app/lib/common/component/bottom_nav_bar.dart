@@ -2,12 +2,19 @@ import 'dart:ui';
 
 import 'package:badges/badges.dart' as badges;
 import 'package:flutter/material.dart';
-import 'package:memolanes/constants/index.dart';
+import 'package:memolanes/common/app_haptics.dart';
 
 class BottomNavBar extends StatelessWidget {
   final int selectedIndex;
   final Function(int) onIndexChanged;
   final Function hasUpdateNotification;
+
+  // Visual height of the floating navigation capsule.
+  static const double height = 64;
+
+  // Original side margin used to derive the unscaled design width.
+  // The actual side inset is handled by the surrounding safe-area layout.
+  static const double designHorizontalMargin = 24;
 
   const BottomNavBar({
     super.key,
@@ -23,7 +30,7 @@ class BottomNavBar extends StatelessWidget {
       child: BackdropFilter(
         filter: ImageFilter.blur(sigmaX: 2, sigmaY: 2),
         child: Container(
-          height: StyleConstants.navBarHeight,
+          height: height,
           decoration: BoxDecoration(
             color: Colors.white.withValues(alpha: 0.8),
             borderRadius: BorderRadius.circular(16),
@@ -56,7 +63,10 @@ class BottomNavBar extends StatelessWidget {
 
     return Expanded(
       child: GestureDetector(
-        onTap: () => onIndexChanged(index),
+        onTap: () {
+          AppHaptics.selection();
+          onIndexChanged(index);
+        },
         child: Container(
           color: Colors.transparent,
           padding: const EdgeInsets.all(8),

@@ -17,18 +17,15 @@ use crate::gps_processor::{GpsPreprocessor, ProcessResult};
 use crate::journey_bitmap::JourneyBitmap;
 use crate::journey_data::JourneyData;
 use crate::journey_header::{JourneyHeader, JourneyKind, JourneyType};
+use crate::journey_vector::JourneyVector;
 use crate::logs;
-use crate::renderer::get_default_camera_option_from_journey_bitmap;
-use crate::renderer::internal_server::{Request, RequestResponse, TileRangeResponse};
+use crate::renderer::internal_server::{dispatch_request, WebviewResponse};
 use crate::renderer::MapRenderer;
 use crate::storage::{RawDataFile, Storage};
 use crate::{archive, build_info, export_data, gps_processor, main_db};
 
-use crate::renderer::CameraOptionInternal;
+use crate::utils::{db::DbError, get_bounds_from_journey_bitmap, MapBounds};
 
-pub(crate) type CameraOption = CameraOptionInternal;
-
-use crate::export_data::raw_data_csv_to_gpx_file;
 use log::{error, info, warn};
 
 // TODO: we have way too many locking here and now it is hard to track.
@@ -40,11 +37,20 @@ pub(super) struct MainState {
     main_map_state: Arc<Mutex<MainMapState>>,
 }
 
-static MAIN_STATE: OnceLock<MainState> = OnceLock::new();
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitError {
+    DatabaseVersionTooNew,
+}
+
+static MAIN_STATE: OnceLock<Result<MainState, InitError>> = OnceLock::new();
 
 #[frb(ignore)]
 pub fn get() -> &'static MainState {
-    MAIN_STATE.get().expect("main state is not initialized")
+    MAIN_STATE
+        .get()
+        .expect("main state is not initialized")
+        .as_ref()
+        .expect("main state initialization failed")
 }
 
 #[frb(sync)]
@@ -74,11 +80,17 @@ fn reload_main_map_bitmap(storage: &Storage, main_map_state: &mut MainMapState) 
     Ok(())
 }
 
-pub fn init(temp_dir: String, doc_dir: String, support_dir: String, system_cache_dir: String) {
-    let mut already_initialized = true;
-    MAIN_STATE.get_or_init(|| {
-        already_initialized = false;
+pub fn init(
+    temp_dir: String,
+    doc_dir: String,
+    support_dir: String,
+    system_cache_dir: String,
+) -> Result<(), InitError> {
+    if MAIN_STATE.get().is_some() {
+        warn!("`init` is called multiple times");
+    }
 
+    let state = MAIN_STATE.get_or_init(|| {
         let (real_cache_dir, logs) = prepare_real_cache_dir(&support_dir, &system_cache_dir)
             .expect("Failed to initialize cache dir");
 
@@ -91,7 +103,20 @@ pub fn init(temp_dir: String, doc_dir: String, support_dir: String, system_cache
             }
         }
 
-        let mut storage = Storage::init(temp_dir, doc_dir, support_dir, real_cache_dir);
+        let storage = match Storage::init(temp_dir, doc_dir, support_dir, real_cache_dir) {
+            Ok(storage) => storage,
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<DbError>(),
+                    Some(DbError::VersionTooNew)
+                ) =>
+            {
+                return Err(InitError::DatabaseVersionTooNew);
+            }
+            Err(error) => panic!("failed to initialize storage: {error:?}"),
+        };
+
+        let mut storage = storage;
         info!("initialized");
 
         let default_layer_filter = LayerFilter {
@@ -121,14 +146,16 @@ pub fn init(temp_dir: String, doc_dir: String, support_dir: String, system_cache
         }));
         info!("main map renderer initialized");
 
-        MainState {
+        Ok(MainState {
             storage,
             gps_preprocessor: Mutex::new(GpsPreprocessor::new()),
             main_map_state,
-        }
+        })
     });
-    if already_initialized {
-        warn!("`init` is called multiple times");
+
+    match state {
+        Ok(_) => Ok(()),
+        Err(err) => Err(*err),
     }
 }
 
@@ -154,7 +181,7 @@ fn prepare_real_cache_dir(
                 LogLevel::Info,
                 format!("Setting up real cache dir for Android at {final_path:?}"),
             ));
-            // TODO this can be delete when most people have rolled pass this.
+            // TODO: this can be deleted when most people have rolled past this.
             let old_dir = Path::new(system_cache_dir);
             if old_dir.exists() {
                 logs.push((
@@ -291,43 +318,35 @@ pub enum MapRendererProxy {
 }
 
 impl MapRendererProxy {
-    pub fn handle_webview_requests(&mut self, request: String) -> Result<String> {
-        let request = Request::parse(&request)?;
-        let response = match self {
-            MapRendererProxy::StaticRenderer(map_renderer) => {
-                let map_renderer = map_renderer.get_mut().unwrap();
-                request.handle(map_renderer)
+    pub fn handle_request(
+        &mut self,
+        path: String,
+        query_params: HashMap<String, String>,
+    ) -> Result<WebviewResponse> {
+        let resp = match self {
+            MapRendererProxy::StaticRenderer(mr) => {
+                dispatch_request(&path, &query_params, mr.get_mut().unwrap())
             }
-            MapRendererProxy::DynamicRenderer(map_renderer) => {
-                let mut map_renderer = map_renderer.lock().unwrap();
-                request.handle(&mut map_renderer)
+            MapRendererProxy::DynamicRenderer(mr) => {
+                dispatch_request(&path, &query_params, &mut mr.lock().unwrap())
             }
             MapRendererProxy::MainMapRenderer => {
                 let mut main_map_state = get().main_map_state.lock().unwrap();
-                match main_map_state.dropped_for_power_saving {
-                    false => request.handle(&mut main_map_state.map_renderer),
-                    true =>
-                    // TODO: This is hacky. I think we should make the type better here for `main_map_state`.
-                    // Also have a dedicate value for this case in the response. Right now we reuse the case that
-                    // indicates nothing changed in the map.
-                    {
-                        let response_data = TileRangeResponse {
-                            status: 304,
-                            headers: HashMap::new(),
-                            body: Vec::new(),
-                        };
-                        RequestResponse {
-                            request_id: request.request_id.clone(),
-                            success: true,
-                            data: Some(serde_json::to_value(response_data)?),
-                            error: None,
-                        }
-                    }
+                if main_map_state.dropped_for_power_saving {
+                    return Ok(WebviewResponse {
+                        status: 200,
+                        content_type: "application/octet-stream".to_string(),
+                        body: Vec::new(),
+                        headers: HashMap::from([(
+                            "X-Not-Modified".to_string(),
+                            "true".to_string(),
+                        )]),
+                    });
                 }
+                dispatch_request(&path, &query_params, &mut main_map_state.map_renderer)
             }
         };
-        serde_json::to_string(&response)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize response: {e}"))
+        Ok(resp)
     }
 }
 
@@ -336,7 +355,7 @@ pub fn get_map_renderer_proxy_for_main_map() -> MapRendererProxy {
     MapRendererProxy::MainMapRenderer
 }
 
-// TODO: does this interface necessary?
+// TODO: is this interface necessary?
 #[frb(sync)]
 pub fn get_empty_map_renderer_proxy() -> MapRendererProxy {
     let journey_bitmap = JourneyBitmap::new();
@@ -374,22 +393,22 @@ pub fn get_map_renderer_proxy_for_journey_date_range(
 
 fn get_map_renderer_proxy_for_journey_data_internal(
     journey_data: JourneyData,
-) -> Result<(MapRendererProxy, Option<CameraOption>)> {
+) -> Result<(MapRendererProxy, Option<MapBounds>)> {
     let mut journey_bitmap = JourneyBitmap::new();
     journey_data.merge_into(&mut journey_bitmap);
 
-    let default_camera_option = get_default_camera_option_from_journey_bitmap(&journey_bitmap);
+    let bounds = get_bounds_from_journey_bitmap(&mut journey_bitmap);
 
     let map_renderer = MapRenderer::new(journey_bitmap);
     Ok((
         MapRendererProxy::DynamicRenderer(Arc::new(Mutex::new(map_renderer))),
-        default_camera_option,
+        bounds,
     ))
 }
 
 pub fn get_map_renderer_proxy_for_journey(
     journey_id: &str,
-) -> Result<(MapRendererProxy, Option<CameraOption>)> {
+) -> Result<(MapRendererProxy, Option<MapBounds>)> {
     let journey_data = get()
         .storage
         .with_db_txn(|txn| txn.get_journey_data(journey_id))?;
@@ -398,7 +417,7 @@ pub fn get_map_renderer_proxy_for_journey(
 
 pub fn get_map_renderer_proxy_for_journey_data(
     journey_data: &OpaqueJourneyData,
-) -> Result<(MapRendererProxy, Option<CameraOption>)> {
+) -> Result<(MapRendererProxy, Option<MapBounds>)> {
     // TODO: the clone here is not ideal, we should redesign the interface,
     // maybe consider Arc.
     let journey_data = journey_data.borrow_inner().clone();
@@ -573,59 +592,141 @@ pub fn list_all_journeys() -> Result<Vec<JourneyHeader>> {
         .with_db_txn(|txn| txn.query_journeys(None, None))
 }
 
+pub fn has_journeys() -> Result<bool> {
+    get().storage.with_db_txn(|txn| txn.has_journeys())
+}
+
 pub fn get_journey_header(journey_id: String) -> Result<Option<JourneyHeader>> {
     get()
         .storage
         .with_db_txn(|txn| txn.get_journey_header(&journey_id))
 }
 
-pub fn generate_full_archive(target_filepath: String) -> Result<()> {
+pub fn generate_full_archive(target_filepath: String) -> Result<ExportResult> {
     info!("generating full archive");
-    let mut file = File::create(target_filepath)?;
-    get()
-        .storage
-        .with_db_txn(|txn| archive::export_as_mldx(&archive::WhatToExport::All, txn, &mut file))?;
-    drop(file);
-    Ok(())
+    if !has_journeys()? {
+        Ok(ExportResult::DataIsEmpty)
+    } else {
+        let mut file = File::create(target_filepath)?;
+        get().storage.with_db_txn(|txn| {
+            archive::export_all_journeys_as_mldx(txn, &mut file, archive::SectionVersion::V1)
+        })?;
+        Ok(ExportResult::Succeed)
+    }
 }
 
-pub fn generate_single_archive(journey_id: String, target_filepath: String) -> Result<()> {
-    info!("generating single journey archive");
-    let mut file = File::create(target_filepath)?;
-    get().storage.with_db_txn(|txn| {
-        archive::export_as_mldx(&archive::WhatToExport::Just(journey_id), txn, &mut file)
-    })?;
-    drop(file);
-    Ok(())
+pub fn export_all_journeys_as_fwss(target_filepath: String) -> Result<ExportResult> {
+    info!("exporting all journeys as FWSS");
+    if !has_journeys()? {
+        Ok(ExportResult::DataIsEmpty)
+    } else {
+        let journey_bitmap = get()
+            .storage
+            .get_latest_bitmap_for_main_map_renderer(&Some(LayerKind::All), false)?;
+        if journey_bitmap.is_empty() {
+            Ok(ExportResult::DataIsEmpty)
+        } else {
+            let mut file = File::create(target_filepath)?;
+            export_data::fow::journey_bitmap_to_fwss_file(&journey_bitmap, &mut file)?;
+            Ok(ExportResult::Succeed)
+        }
+    }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExportType {
     GPX = 0,
     KML = 1,
+    FWSS = 2,
+    MLDX = 3,
 }
 
-#[auto_context]
+pub enum ExportResult {
+    Succeed,
+    DataIsEmpty,
+}
+
+enum InternalDataForExport {
+    Mldx(JourneyHeader, JourneyData),
+    Fwss(JourneyData),
+    Gpx(JourneyVector),
+    Kml(JourneyVector),
+}
+
 pub fn export_journey(
     target_filepath: String,
     journey_id: String,
     export_type: ExportType,
-) -> Result<()> {
-    let journey_data = get()
-        .storage
-        .with_db_txn(|txn| txn.get_journey_data(&journey_id))?;
-    match journey_data {
-        JourneyData::Bitmap(_bitmap) => Err(anyhow!("Data type error")),
-        JourneyData::Vector(vector) => {
-            let mut file = File::create(target_filepath)?;
-            match export_type {
-                ExportType::GPX => {
-                    export_data::journey_vector_to_gpx_file(&vector, &mut file)?;
-                }
-                ExportType::KML => {
-                    export_data::journey_vector_to_kml_file(&vector, &mut file)?;
-                }
+) -> Result<ExportResult> {
+    let data_for_export = get().storage.with_db_txn(|txn| {
+        let journey_data = txn.get_journey_data(&journey_id)?;
+
+        if export_type != ExportType::MLDX {
+            // A bit weird, but we allow exporting empty journey as MLDX, unlike
+            // other format, this still means something (metadata).
+            //  we tried to avoid having empty journey in our database.
+            if journey_data.is_empty() {
+                return Ok(None);
             }
-            Ok(())
+        }
+
+        match export_type {
+            ExportType::MLDX => {
+                let journey_header = txn
+                    .get_journey_header(&journey_id)?
+                    .expect("header must exist because we already got the data.");
+                Ok(Some(InternalDataForExport::Mldx(
+                    journey_header,
+                    journey_data,
+                )))
+            }
+            ExportType::FWSS => Ok(Some(InternalDataForExport::Fwss(journey_data))),
+            ExportType::GPX => match journey_data {
+                JourneyData::Bitmap(_) => Err(anyhow!("cannot export bitmap data as gpx")),
+                JourneyData::Vector(vector) => Ok(Some(InternalDataForExport::Gpx(vector))),
+            },
+            ExportType::KML => match journey_data {
+                JourneyData::Bitmap(_) => Err(anyhow!("cannot export bitmap data as kml")),
+                JourneyData::Vector(vector) => Ok(Some(InternalDataForExport::Kml(vector))),
+            },
+        }
+    })?;
+
+    // the main reason for having `data_for_export` is to run the expensive file generation
+    // outside `with_txn`, so we don't need to hold the lock.
+
+    match data_for_export {
+        None => Ok(ExportResult::DataIsEmpty),
+        Some(data_for_export) => {
+            let mut file = File::create(&target_filepath)?;
+            match data_for_export {
+                InternalDataForExport::Mldx(header, data) => {
+                    archive::export_single_journey_as_mldx(
+                        header,
+                        data,
+                        &mut file,
+                        archive::SectionVersion::V1,
+                    )?
+                }
+                InternalDataForExport::Fwss(data) => {
+                    let bitmap = match data {
+                        JourneyData::Bitmap(bitmap) => bitmap,
+                        JourneyData::Vector(vector) => {
+                            let mut journey_bitmap = JourneyBitmap::new();
+                            journey_bitmap.merge_vector(&vector);
+                            journey_bitmap
+                        }
+                    };
+                    export_data::fow::journey_bitmap_to_fwss_file(&bitmap, &mut file)?
+                }
+                InternalDataForExport::Gpx(vector) => {
+                    export_data::gpx::journey_vector_to_gpx_file(&vector, &mut file)?
+                }
+                InternalDataForExport::Kml(vector) => {
+                    export_data::kml::journey_vector_to_kml_file(&vector, &mut file)?
+                }
+            };
+            Ok(ExportResult::Succeed)
         }
     }
 }
@@ -660,7 +761,7 @@ pub fn export_raw_data_gpx_file(csv_filepath: String) -> Result<String> {
 
     let mut writer = BufWriter::new(gpx_file);
 
-    raw_data_csv_to_gpx_file(&mut reader, &mut writer)
+    export_data::gpx::raw_data_csv_to_gpx_file(&mut reader, &mut writer)
         .with_context(|| format!("Failed to convert CSV to GPX: {csv_filepath}"))?;
 
     Ok(gpx_path_str)
@@ -751,7 +852,7 @@ pub fn rebuild_cache() -> Result<()> {
 // multiple FoW data. Bitmap does not necessarily mean FoW data, but this is
 // good enough.
 pub fn contains_bitmap_journey() -> Result<bool> {
-    // TODO: we should just have a real SQL query for this, instead of a liner
+    // TODO: we should just have a real SQL query for this, instead of a linear
     // scan that involves deserializing all journey heads.
     let journey_headers = get()
         .storage

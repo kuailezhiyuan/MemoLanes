@@ -23,14 +23,14 @@ class ImportDataPage extends StatefulWidget {
   State<ImportDataPage> createState() => _ImportDataPage();
 }
 
-enum ImportType { fow, gpxOrKml }
+enum ImportType { fow, vector }
 
 class _ImportDataPage extends State<ImportDataPage> {
   import_api.JourneyInfo? journeyInfo;
   late final f.Either<api.OpaqueJourneyData, import_api.RawVectorData>
       journeyDataMaybeRaw;
   api.MapRendererProxy? _mapRendererProxy;
-  MapView? _initialMapView;
+  MapBounds? _initialMapBounds;
   late import_api.ImportPreprocessor _preprocessor;
 
   @override
@@ -69,9 +69,7 @@ class _ImportDataPage extends State<ImportDataPage> {
       if (!mounted) return;
       await showCommonDialog(context, context.tr("import.parsing_failed"));
       if (!mounted) return;
-      if (Navigator.canPop(context)) {
-        Navigator.pop(context);
-      }
+      popCurrentRoute(context);
     }
   }
 
@@ -87,9 +85,9 @@ class _ImportDataPage extends State<ImportDataPage> {
         });
         break;
 
-      case ImportType.gpxOrKml:
+      case ImportType.vector:
         var (journeyInfo, rawVectorData, detectedProcessor) =
-            await import_api.loadGpxOrKml(filePath: path);
+            await import_api.loadVectorData(filePath: path);
         setState(() {
           this.journeyInfo = journeyInfo;
           _preprocessor = detectedProcessor;
@@ -127,21 +125,13 @@ class _ImportDataPage extends State<ImportDataPage> {
           importProcessor: _preprocessor,
         ),
     };
-    final mapRendererProxyAndCameraOption =
-        await api.getMapRendererProxyForJourneyData(
+    final rendererAndBounds = await api.getMapRendererProxyForJourneyData(
       journeyData: journeyData,
     );
 
     setState(() {
-      _mapRendererProxy = mapRendererProxyAndCameraOption.$1;
-      final cameraOption = mapRendererProxyAndCameraOption.$2;
-      if (cameraOption != null) {
-        _initialMapView = (
-          lng: cameraOption.lng,
-          lat: cameraOption.lat,
-          zoom: cameraOption.zoom,
-        );
-      }
+      _mapRendererProxy = rendererAndBounds.$1;
+      _initialMapBounds = rendererAndBounds.$2;
     });
 
     return !await import_api.isJourneyDataEmpty(
@@ -186,6 +176,12 @@ class _ImportDataPage extends State<ImportDataPage> {
   @override
   Widget build(BuildContext context) {
     final journeyInfo = this.journeyInfo;
+    final panelHeight = widget.importType == ImportType.vector ? 530.0 : 510.0;
+    final mapBoundsPadding =
+        CapsuleStyleOverlayAppBar.mapFitPaddingForBottomOverlay(
+      context,
+      bottomOverlayHeight: panelHeight,
+    );
 
     return Scaffold(
       body: journeyInfo == null
@@ -198,8 +194,7 @@ class _ImportDataPage extends State<ImportDataPage> {
                     topLeft: Radius.circular(16.0),
                     topRight: Radius.circular(16.0),
                   ),
-                  maxHeight:
-                      widget.importType == ImportType.gpxOrKml ? 530 : 510,
+                  maxHeight: panelHeight,
                   defaultPanelState: PanelState.OPEN,
                   panel: PointerInterceptor(
                     child: Center(
@@ -233,7 +228,8 @@ class _ImportDataPage extends State<ImportDataPage> {
                       : BaseMapWebview(
                           key: const ValueKey("mapWidget"),
                           mapRendererProxy: _mapRendererProxy!,
-                          initialMapView: _initialMapView,
+                          initialMapBounds: _initialMapBounds,
+                          initialMapBoundsPadding: mapBoundsPadding,
                         ),
                 ),
                 CapsuleStyleOverlayAppBar.overlayBar(

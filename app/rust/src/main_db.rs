@@ -4,9 +4,7 @@ use auto_context::auto_context;
 use chrono::{DateTime, Local, NaiveDate, Timelike, Utc};
 use protobuf::Message;
 use rusqlite::{Connection, OptionalExtension, Transaction};
-use std::cmp::Ordering;
 use std::error::Error;
-use std::path::Path;
 use std::str::FromStr;
 use uuid::Uuid;
 
@@ -34,40 +32,6 @@ deserialize the header.
 
 // 3 is the zstd default
 pub const ZSTD_COMPRESS_LEVEL: i32 = 3;
-
-#[auto_context]
-#[allow(clippy::type_complexity)]
-fn open_db_and_run_migration(
-    support_dir: &str,
-    file_name: &str,
-    migrations: &[&dyn Fn(&Transaction) -> Result<()>],
-) -> Result<Connection> {
-    debug!("open and run migration for {file_name}");
-    let mut conn = rusqlite::Connection::open(Path::new(support_dir).join(file_name))?;
-    let tx = conn.transaction()?;
-
-    let version = utils::db::init_metadata_and_get_version(&tx)? as usize;
-    let target_version = migrations.len();
-    debug!("current version = {version}, target_version = {target_version}");
-    match version.cmp(&target_version) {
-        Ordering::Equal => (),
-        Ordering::Less => {
-            for i in (version)..target_version {
-                info!("running migration for version: {}", i + 1);
-                let f = migrations.get(i).unwrap();
-                f(&tx)?;
-            }
-            utils::db::set_version_in_metadata(&tx, target_version as i32)?;
-        }
-        Ordering::Greater => {
-            bail!(
-                "version too high: current version = {version}, target_version = {target_version}"
-            );
-        }
-    }
-    tx.commit()?;
-    Ok(conn)
-}
 
 pub struct Txn<'a> {
     db_txn: rusqlite::Transaction<'a>,
@@ -211,13 +175,13 @@ impl Txn<'_> {
                 if existing_header.revision == header.revision {
                     info!(
                         "Journey with ID {} already exists with the same revision, skip insert",
-                        &header.id
+                        header.id
                     );
                     return Ok(());
                 } else {
                     bail!(
                         "Journey with ID {} already exists but with a different revision",
-                        &header.id
+                        header.id
                     );
                 }
             }
@@ -319,7 +283,7 @@ impl Txn<'_> {
         note: Option<String>,
         new_journey_kind: JourneyKind,
     ) -> Result<()> {
-        info!("Updating journey with ID {}", &id);
+        info!("Updating journey with ID {}", id);
 
         let mut header = self
             .get_journey_header(id)?
@@ -369,7 +333,7 @@ impl Txn<'_> {
         id: &str,
         journey_data: JourneyData,
     ) -> Result<()> {
-        info!("Updating journey data with ID {}", &id);
+        info!("Updating journey data with ID {}", id);
 
         let mut header = self
             .get_journey_header(id)?
@@ -525,6 +489,16 @@ impl Txn<'_> {
     }
 
     #[auto_context]
+    pub fn has_journeys(&self) -> Result<bool> {
+        let mut query = self.db_txn.prepare("SELECT 1 FROM journey LIMIT 1;")?;
+        Ok(query
+            .query_row((), |_| Ok(()))
+            .optional()
+            .context("has_journeys")?
+            .is_some())
+    }
+
+    #[auto_context]
     pub fn years_with_journey(&self) -> Result<Vec<i32>> {
         let mut query = self
             .db_txn
@@ -667,52 +641,62 @@ pub struct MainDb {
     conn: Connection,
 }
 
+fn migrations() -> [utils::db::Migration<'static>; 1] {
+    fn migrate_to_1_0(tx: &Transaction) -> Result<()> {
+        let sql = "
+        CREATE TABLE ongoing_journey (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT
+                                UNIQUE
+                                NOT NULL,
+            timestamp_sec  INTEGER,
+            lat            REAL    NOT NULL,
+            lng            REAL    NOT NULL,
+            process_result INTEGER NOT NULL
+        );
+        CREATE TABLE journey (
+            id                TEXT    PRIMARY KEY
+                                      NOT NULL
+                                      UNIQUE,
+            journey_date      INTEGER NOT NULL, -- days since epoch
+            timestamp_for_ordering
+                              INTEGER,          -- start time (fallback to end time)
+            type              INTEGER NOT NULL,
+            header            BLOB    NOT NULL,
+            data              BLOB    NOT NULL
+        );
+        CREATE INDEX journey_date_index ON journey (
+            journey_date DESC
+        );
+        CREATE TABLE setting (
+            key               TEXT    PRIMARY KEY
+                                      NOT NULL
+                                      UNIQUE,
+            value             TEXT
+        );
+        ";
+        for statement in sql_split::split(sql) {
+            tx.execute(&statement, ())?;
+        }
+        Ok(())
+    }
+
+    [utils::db::Migration::new(1, 0, &migrate_to_1_0)]
+}
+
+#[cfg(test)]
+mod migration_tests {
+    #[test]
+    fn migrations_are_in_order() {
+        assert!(crate::utils::db::migrations_are_strictly_increasing(
+            &super::migrations()
+        ));
+    }
+}
+
 impl MainDb {
-    pub fn open(support_dir: &str) -> MainDb {
-        // TODO: better error handling
-        let conn = open_db_and_run_migration(
-            support_dir,
-            "main.db",
-            &[&|tx| {
-                let sql = "
-                CREATE TABLE ongoing_journey (
-                    id             INTEGER PRIMARY KEY AUTOINCREMENT
-                                        UNIQUE
-                                        NOT NULL,
-                    timestamp_sec  INTEGER,
-                    lat            REAL    NOT NULL,
-                    lng            REAL    NOT NULL,
-                    process_result INTEGER NOT NULL
-                );
-                CREATE TABLE journey (
-                    id                TEXT    PRIMARY KEY
-                                              NOT NULL
-                                              UNIQUE,
-                    journey_date      INTEGER NOT NULL, -- days since epoch
-                    timestamp_for_ordering
-                                      INTEGER,          -- start time (fallback to end time)
-                    type              INTEGER NOT NULL,
-                    header            BLOB    NOT NULL,
-                    data              BLOB    NOT NULL
-                );
-                CREATE INDEX journey_date_index ON journey (
-                    journey_date DESC
-                );
-                CREATE TABLE setting (
-                    key               TEXT    PRIMARY KEY
-                                              NOT NULL
-                                              UNIQUE,
-                    value             TEXT
-                );
-                ";
-                for s in sql_split::split(sql) {
-                    tx.execute(&s, ())?;
-                }
-                Ok(())
-            }],
-        )
-        .expect("failed to open main db");
-        MainDb { conn }
+    pub fn open(support_dir: &str) -> Result<MainDb> {
+        let conn = utils::db::open_and_migrate(support_dir, "main.db", &migrations())?;
+        Ok(MainDb { conn })
     }
 
     #[auto_context]

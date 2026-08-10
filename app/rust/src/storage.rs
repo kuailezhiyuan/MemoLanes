@@ -1,10 +1,12 @@
 extern crate simplelog;
+use crate::achievement::AchievementReader;
 use crate::cache_db::{self, CacheDb, LayerKind};
+use crate::geo::{GeoIndex, GeoLookup};
 use crate::gps_processor::{self, ProcessResult};
 use crate::journey_bitmap::JourneyBitmap;
 use crate::journey_header::JourneyKind;
+use crate::journey_snapshot::JourneySnapshot;
 use crate::main_db::{self, Action, MainDb};
-use crate::merged_journey_builder;
 use anyhow::{Context, Ok, Result};
 use auto_context::auto_context;
 use chrono::{Local, NaiveDate};
@@ -123,16 +125,22 @@ impl RawDataRecorder {
 
 type FinalizedJourneyChangedCallback = Box<dyn Fn(&Storage) + Send + Sync + 'static>;
 
+struct Inner {
+    main_db: MainDb,
+    cache_db: Box<dyn CacheDb + Send>,
+    geo: Option<Box<dyn GeoLookup + Send>>,
+}
+
+fn geo_ref(geo: &Option<Box<dyn GeoLookup + Send>>) -> Option<&dyn GeoLookup> {
+    geo.as_deref().map(|geo| geo as &dyn GeoLookup)
+}
+
 pub struct Storage {
     support_dir: String,
     raw_data_recorder: Mutex<Option<RawDataRecorder>>, // `None` means disabled
     pub cache_dir: String,
-    // TODO: I feel the abstraction between `dbs`, `merged_journey_builder`, and
-    // `main_map_renderer_need_to_reload` is a bit bad. We should refactor it,
-    // but maybe do that when we know more.
-    // NOTE: both db are deliberately hidden so all operations need to go
-    // through `Storage` to make sure they are in sync.
-    dbs: Mutex<(MainDb, Box<dyn CacheDb + Send>)>,
+    // Hidden so every operation goes through `Storage` and stays in sync; reads
+    dbs: Mutex<Inner>,
     finalized_journey_changed_callback: FinalizedJourneyChangedCallback,
 }
 
@@ -142,8 +150,8 @@ impl Storage {
         _doc_dir: String,
         support_dir: String,
         cache_dir: String,
-    ) -> Self {
-        let mut main_db = MainDb::open(&support_dir);
+    ) -> Result<Self> {
+        let mut main_db = MainDb::open(&support_dir)?;
         let cache_db: Box<dyn CacheDb + Send> = Box::new(cache_db::new(&cache_dir));
         let raw_data_recorder =
             if main_db.get_setting_with_default(crate::main_db::Setting::RawDataMode, false) {
@@ -151,13 +159,17 @@ impl Storage {
             } else {
                 None
             };
-        Storage {
+        Ok(Storage {
             support_dir,
             raw_data_recorder: Mutex::new(raw_data_recorder),
             cache_dir,
-            dbs: Mutex::new((main_db, cache_db)),
+            dbs: Mutex::new(Inner {
+                main_db,
+                cache_db,
+                geo: None,
+            }),
             finalized_journey_changed_callback: Box::new(|_| {}),
-        }
+        })
     }
 
     #[auto_context]
@@ -166,35 +178,33 @@ impl Storage {
         F: FnOnce(&mut main_db::Txn) -> Result<O>,
     {
         let mut dbs = self.dbs.lock().unwrap();
-        let (ref mut main_db, ref cache_db) = *dbs;
+        let Inner {
+            main_db,
+            cache_db,
+            geo,
+        } = &mut *dbs;
+        let geo = geo_ref(geo);
 
         let mut finalized_journey_changed = false;
 
         let output = main_db.with_txn(|txn| {
             let output = f(txn)?;
 
-            match &txn.action {
-                None => (),
-                Some(action) => {
-                    match action {
-                        Action::CompleteRebuilt => {
-                            cache_db.clear_all()?;
-                        }
-                        Action::Invalidate { entries } => {
-                            cache_db.invalidate(entries)?;
-                        }
-                        Action::MergeOne { entry, data } => {
-                            cache_db.merge_journey(entry, data)?;
-                        }
-                    };
-                    finalized_journey_changed = true;
+            if let Some(action) = &txn.action {
+                match action {
+                    Action::CompleteRebuilt => cache_db.clear_all()?,
+                    Action::Invalidate { entries } => cache_db.invalidate(entries)?,
+                    Action::MergeOne { entry, data, .. } => {
+                        cache_db.merge_journey(entry, data, geo)?
+                    }
                 }
+                finalized_journey_changed = true;
             }
 
             Ok(output)
         })?;
 
-        // Make using we are not holding the lock when calling the callback
+        // Make sure we are not holding the lock when calling the callback
         // TODO: This is still error-prone, and easy to cause deadlock. Consider
         // using a separate thread to call the callback.
         drop(dbs);
@@ -211,7 +221,7 @@ impl Storage {
             if raw_data_recorder.is_none() {
                 *raw_data_recorder = Some(RawDataRecorder::init(&self.support_dir));
                 info!("[storage] raw data mod enabled");
-                let main_db = &mut self.dbs.lock().unwrap().0;
+                let main_db = &mut self.dbs.lock().unwrap().main_db;
                 main_db
                     .set_setting(crate::main_db::Setting::RawDataMode, true)
                     .unwrap();
@@ -220,7 +230,7 @@ impl Storage {
             info!("[storage] raw data mod disabled");
             // `drop` should do the right thing and release all resources.
             *raw_data_recorder = None;
-            let main_db = &mut self.dbs.lock().unwrap().0;
+            let main_db = &mut self.dbs.lock().unwrap().main_db;
             main_db
                 .set_setting(crate::main_db::Setting::RawDataMode, false)
                 .unwrap();
@@ -272,7 +282,7 @@ impl Storage {
         }
         drop(raw_data_recorder);
 
-        let main_db = &mut self.dbs.lock().unwrap().0;
+        let main_db = &mut self.dbs.lock().unwrap().main_db;
         main_db.record(raw_data, process_result).unwrap();
     }
 
@@ -317,22 +327,107 @@ impl Storage {
         self.finalized_journey_changed_callback = callback;
     }
 
+    /// Run `f` with a logically read-only [`JourneySnapshot`] under one `dbs` lock
+    /// and one `MainDb` transaction. Every read `f` performs sees the
+    /// SAME snapshot, so a journey merge cannot land between two reads
+    /// and make them mutually inconsistent (e.g. an `All` bitmap smaller
+    /// than `Default`'s). Callers compose whatever reads they need; the
+    /// cache's mutating ops stay private to `Storage`, which owns the
+    /// main_db↔cache_db sync invariant.
+    ///
+    /// Does NOT route through `with_db_txn` — `std::sync::Mutex` is not
+    /// reentrant, so taking the `dbs` lock again would deadlock.
+    #[auto_context]
+    pub fn with_journey_snapshot<F, O>(&self, f: F) -> Result<O>
+    where
+        F: FnOnce(&mut JourneySnapshot) -> Result<O>,
+    {
+        let mut dbs = self.dbs.lock().unwrap();
+        let Inner {
+            main_db, cache_db, ..
+        } = &mut *dbs;
+        main_db.with_txn(|txn| {
+            let output = f(&mut JourneySnapshot::new(txn, cache_db.as_mut()))?;
+            // The snapshot only exposes reads, so a journey action must
+            // never have been recorded on this txn.
+            debug_assert_eq!(txn.action, None);
+            Ok(output)
+        })
+    }
+
+    /// Run `f` against achievement answers under one `dbs` lock and one read
+    /// txn, so the values `f` reads are internally consistent. Whether they come
+    /// from persisted rows or are computed on the spot is the cache's business.
+    ///
+    /// Like `with_journey_snapshot`, does NOT route through `with_db_txn`
+    /// (`std::sync::Mutex` is not reentrant).
+    #[auto_context]
+    pub fn with_achievement_read<F, O>(&self, f: F) -> Result<O>
+    where
+        F: FnOnce(&mut dyn AchievementReader) -> Result<O>,
+    {
+        // TODO: locks here for now, add MVCC or background thread to recompute
+        let mut dbs = self.dbs.lock().unwrap();
+        let Inner {
+            main_db,
+            cache_db,
+            geo,
+        } = &mut *dbs;
+        let geo = geo_ref(geo);
+        let cache_db = cache_db.as_mut();
+        main_db.with_txn(|txn| {
+            let mut reader = cache_db.achievement_reader(txn, geo)?;
+            let output = f(reader.as_mut())?;
+            debug_assert_eq!(txn.action, None);
+            Ok(output)
+        })
+    }
+
+    /// Install a worldview's geo asset from raw bytes. The asset must declare
+    /// the same worldview id it is loaded as (the `.bin` is self-describing); a
+    /// mismatch means the wrong bin was supplied.
+    #[auto_context]
+    pub fn init_or_change_geo_data(
+        &self,
+        worldview: geo_data_format::Worldview,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let geo = GeoIndex::from_bytes(bytes)?;
+        anyhow::ensure!(
+            geo.worldview_id() == worldview.spec().id,
+            "geo asset declares worldview {:?} but was loaded as {:?}",
+            geo.worldview_id(),
+            worldview.spec().id
+        );
+        self.dbs.lock().unwrap().geo = Some(Box::new(geo));
+        Ok(())
+    }
+
+    /// The bitmap the main map renders: finalized coverage for
+    /// `layer_kind` (`None` → no finalized base) plus, when
+    /// `include_ongoing`, the not-yet-finalized journey merged on top.
     #[auto_context]
     pub fn get_latest_bitmap_for_main_map_renderer(
         &self,
         layer_kind: &Option<LayerKind>,
         include_ongoing: bool,
     ) -> Result<JourneyBitmap> {
-        let mut dbs = self.dbs.lock().unwrap();
-        let (ref mut main_db, ref cache_db) = *dbs;
-        let journey_bitmap = main_db.with_txn(|txn| {
-            merged_journey_builder::get_full(txn, cache_db.as_ref(), layer_kind, include_ongoing)
-        })?;
-        drop(dbs);
-
-        Ok(journey_bitmap)
+        self.with_journey_snapshot(|snapshot| {
+            let mut bitmap = match layer_kind {
+                Some(layer_kind) => snapshot.finalized_bitmap(layer_kind, None)?,
+                None => JourneyBitmap::new(),
+            };
+            if include_ongoing {
+                if let Some(journey_vector) = snapshot.ongoing_journey()? {
+                    bitmap.merge_vector(&journey_vector);
+                }
+            }
+            Ok(bitmap)
+        })
     }
 
+    /// Finalized coverage within `[from, to]`, optionally filtered to one
+    /// journey kind (`None` → all kinds). Used by the time machine.
     #[auto_context]
     pub fn get_range_bitmap(
         &self,
@@ -340,25 +435,18 @@ impl Storage {
         to_date_inclusive: NaiveDate,
         kind: Option<&JourneyKind>,
     ) -> Result<JourneyBitmap> {
-        let mut dbs = self.dbs.lock().unwrap();
-        let (ref mut main_db, ref cache_db) = *dbs;
-        main_db.with_txn(|txn| {
-            let bitmap = merged_journey_builder::get_range(
-                txn,
-                cache_db.as_ref(),
-                from_date_inclusive,
-                to_date_inclusive,
-                kind,
-            )?;
-            assert_eq!(txn.action, None);
-            Ok(bitmap)
+        let layer_kind = match kind {
+            Some(kind) => LayerKind::JourneyKind(*kind),
+            None => LayerKind::All,
+        };
+        self.with_journey_snapshot(|snapshot| {
+            snapshot.finalized_bitmap(&layer_kind, Some((from_date_inclusive, to_date_inclusive)))
         })
     }
 
     #[auto_context]
     pub fn clear_all_cache(&self) -> Result<()> {
-        let cache_db = &self.dbs.lock().unwrap().1;
-        cache_db.clear_all()?;
+        self.dbs.lock().unwrap().cache_db.clear_all()?;
         Ok(())
     }
 
@@ -368,8 +456,8 @@ impl Storage {
         debug!("[storage] flushing");
 
         let dbs = self.dbs.lock().unwrap();
-        dbs.0.flush()?;
-        dbs.1.flush()?;
+        dbs.main_db.flush()?;
+        dbs.cache_db.flush()?;
         drop(dbs);
 
         let mut raw_data_recorder = self.raw_data_recorder.lock().unwrap();
