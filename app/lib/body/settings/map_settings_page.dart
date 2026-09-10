@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:memolanes/common/component/capsule_style_app_bar.dart';
 import 'package:memolanes/common/component/basic_dialog_card.dart';
 import 'package:memolanes/common/component/app_option_tile.dart';
-import 'package:memolanes/common/component/scroll_views/single_child_scroll_view.dart';
 import 'package:memolanes/common/component/tiles/label_tile.dart';
 import 'package:memolanes/common/component/tiles/label_tile_content.dart';
 import 'package:memolanes/common/map_fog_style.dart';
@@ -125,8 +124,7 @@ class _MapSettingsPageState extends State<MapSettingsPage> {
       appBar: CapsuleStyleAppBar(
         title: context.tr("general.map_settings.title"),
       ),
-      body: MlSingleChildScrollView(
-        padding: const EdgeInsets.all(8.0),
+      body: SettingsPageLayout(
         children: [
           SettingsSection(
             title: context.tr('settings.groups.map_display'),

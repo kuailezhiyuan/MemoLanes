@@ -7,7 +7,6 @@ import 'package:memolanes/body/settings/settings_section.dart';
 import 'package:memolanes/common/component/app_button.dart';
 import 'package:memolanes/common/component/capsule_style_app_bar.dart';
 import 'package:memolanes/common/component/common_export.dart';
-import 'package:memolanes/common/component/scroll_views/single_child_scroll_view.dart';
 import 'package:memolanes/common/component/tiles/label_tile.dart';
 import 'package:memolanes/common/component/tiles/label_tile_content.dart';
 import 'package:memolanes/common/gps_manager.dart';
@@ -28,8 +27,7 @@ class AdvancedSettingsPage extends StatelessWidget {
       appBar: CapsuleStyleAppBar(
         title: context.tr('settings.categories.advanced.title'),
       ),
-      body: MlSingleChildScrollView(
-        padding: const EdgeInsets.all(8),
+      body: SettingsPageLayout(
         children: [
           SettingsSection(
             title: context.tr('settings.groups.diagnostics'),

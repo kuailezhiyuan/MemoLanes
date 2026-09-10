@@ -11,11 +11,8 @@ import 'package:memolanes/common/app_haptics.dart';
 import 'package:memolanes/common/component/app_button.dart';
 import 'package:memolanes/common/component/app_option_tile.dart';
 import 'package:memolanes/common/component/basic_dialog_card.dart';
-import 'package:memolanes/common/component/cards/card_label_tile.dart';
-import 'package:memolanes/common/component/cards/option_card.dart';
 import 'package:memolanes/common/component/capsule_style_app_bar.dart';
 import 'package:memolanes/common/component/common_export.dart';
-import 'package:memolanes/common/component/scroll_views/single_child_scroll_view.dart';
 import 'package:memolanes/common/component/tiles/label_tile.dart';
 import 'package:memolanes/common/component/tiles/label_tile_content.dart';
 import 'package:memolanes/common/gps_manager.dart';
@@ -24,6 +21,8 @@ import 'package:memolanes/common/recording_health_service.dart';
 import 'package:memolanes/common/update_notifier.dart';
 import 'package:memolanes/common/utils.dart';
 import 'package:memolanes/body/settings/settings_section.dart';
+import 'package:memolanes/constants/app_typography.dart';
+import 'package:memolanes/constants/style_constants.dart';
 import 'package:memolanes/src/rust/api/api.dart' as api;
 import 'package:memolanes/utils/nav_helper.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -32,6 +31,8 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:url_launcher/url_launcher_string.dart';
+
+enum _ImportDataSource { mldx, vector, fogOfWorld }
 
 class JourneyRecordingSettingsPage extends StatefulWidget {
   const JourneyRecordingSettingsPage({super.key});
@@ -61,8 +62,7 @@ class _JourneyRecordingSettingsPageState
       appBar: CapsuleStyleAppBar(
         title: context.tr('settings.categories.journey_recording.title'),
       ),
-      body: MlSingleChildScrollView(
-        padding: const EdgeInsets.all(8),
+      body: SettingsPageLayout(
         children: [
           SettingsSection(
             title: context.tr('settings.groups.recording_protection'),
@@ -215,8 +215,7 @@ class _AppearanceSettingsPageState extends State<AppearanceSettingsPage> {
       appBar: CapsuleStyleAppBar(
         title: context.tr('settings.categories.appearance.title'),
       ),
-      body: MlSingleChildScrollView(
-        padding: const EdgeInsets.all(8),
+      body: SettingsPageLayout(
         children: [
           SettingsSection(
             title: context.tr('settings.groups.appearance'),
@@ -280,11 +279,10 @@ class _DataManagementSettingsPageState
       appBar: CapsuleStyleAppBar(
         title: context.tr('settings.categories.data.title'),
       ),
-      body: MlSingleChildScrollView(
-        padding: const EdgeInsets.all(8),
+      body: SettingsPageLayout(
         children: [
           SettingsSection(
-            title: context.tr('settings.groups.data_exchange'),
+            title: context.tr('settings.groups.import_export'),
             children: [
               LabelTile(
                 label: context.tr('data.import_data.title'),
@@ -322,10 +320,21 @@ class _DataManagementSettingsPageState
             ],
           ),
           SettingsSection(
-            title: context.tr('settings.groups.danger_zone'),
+            title: context.tr('settings.groups.delete_data'),
             children: [
               LabelTile(
                 label: context.tr('journey.delete_all'),
+                labelStyle: AppTypography.itemTitle.copyWith(
+                  color: StyleConstants.dangerInkColor,
+                ),
+                prefix: const Padding(
+                  padding: EdgeInsets.only(right: 12),
+                  child: Icon(
+                    Icons.delete_outline_rounded,
+                    color: StyleConstants.dangerInkColor,
+                    size: 20,
+                  ),
+                ),
                 position: LabelTilePosition.single,
                 onTap: () => _deleteAll(context, gpsManager),
               ),
@@ -414,7 +423,7 @@ class _DataManagementSettingsPageState
       context,
       context.tr('journey.delete_all_journey_message'),
       hasCancel: true,
-      title: context.tr('journey.delete_journey_title'),
+      title: context.tr('journey.delete_all_title'),
       confirmButtonText: context.tr('common.delete'),
       confirmVariant: AppButtonVariant.danger,
     )) {
@@ -435,64 +444,79 @@ class _DataManagementSettingsPageState
     }
   }
 
-  void _showImportDataCard(BuildContext context) {
-    showBasicCard(
+  Future<void> _showImportDataCard(BuildContext context) async {
+    final source = await showBasicCard<_ImportDataSource>(
       context,
-      builder: (_) => OptionCard(
-        useSafeArea: false,
-        embedded: true,
+      title: context.tr('data.import_data.title'),
+      builder: (dialogContext) => Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          CardLabelTile(
-            position: CardLabelTilePosition.top,
-            label: context.tr('journey.import_mldx_data'),
-            top: false,
-            onTap: () async {
-              final result = await FilePicker.pickFile(type: FileType.any);
-              if (result?.path != null && context.mounted) {
-                await importMldx(context, result!.path!);
-              }
-            },
+          AppOptionTile(
+            icon: Icons.archive_outlined,
+            title: context.tr('journey.import_mldx_data'),
+            subtitle: context.tr('data.import_data.mldx_desc'),
+            onTap: () =>
+                Navigator.of(dialogContext).pop(_ImportDataSource.mldx),
           ),
-          CardLabelTile(
-            position: CardLabelTilePosition.middle,
-            label: context.tr('import.vector.title'),
-            onTap: () async {
-              await showCommonDialog(
-                context,
-                context.tr('import.vector.description_md'),
-                markdown: true,
-              );
-              if (context.mounted) {
-                await _selectImportFile(context, ImportType.vector);
-              }
-            },
+          const SizedBox(height: 8),
+          AppOptionTile(
+            icon: Icons.route_outlined,
+            title: context.tr('import.vector.title'),
+            subtitle: context.tr('data.import_data.vector_desc'),
+            onTap: () =>
+                Navigator.of(dialogContext).pop(_ImportDataSource.vector),
           ),
-          CardLabelTile(
-            position: CardLabelTilePosition.bottom,
-            label: context.tr('journey.import_fog_of_world_data'),
-            onTap: () async {
-              await showCommonDialog(
-                context,
-                context.tr('import.import_fow_data.description_md'),
-                markdown: true,
-              );
-              if (await api.containsBitmapJourney() && context.mounted) {
-                await showCommonDialog(
-                  context,
-                  context.tr(
-                    'import.import_fow_data.warning_for_import_multiple_data_md',
-                  ),
-                  markdown: true,
-                );
-              }
-              if (context.mounted) {
-                await _selectImportFile(context, ImportType.fow);
-              }
-            },
+          const SizedBox(height: 8),
+          AppOptionTile(
+            icon: Icons.public_outlined,
+            title: context.tr('journey.import_fog_of_world_data'),
+            subtitle: context.tr('data.import_data.fog_of_world_desc'),
+            onTap: () =>
+                Navigator.of(dialogContext).pop(_ImportDataSource.fogOfWorld),
           ),
         ],
       ),
     );
+
+    if (source == null || !context.mounted) return;
+
+    switch (source) {
+      case _ImportDataSource.mldx:
+        final result = await FilePicker.pickFile(type: FileType.any);
+        if (result?.path != null && context.mounted) {
+          await importMldx(context, result!.path!);
+        }
+        return;
+      case _ImportDataSource.vector:
+        await showCommonDialog(
+          context,
+          context.tr('import.vector.description_md'),
+          markdown: true,
+        );
+        if (context.mounted) {
+          await _selectImportFile(context, ImportType.vector);
+        }
+        return;
+      case _ImportDataSource.fogOfWorld:
+        await showCommonDialog(
+          context,
+          context.tr('import.import_fow_data.description_md'),
+          markdown: true,
+        );
+        if (await api.containsBitmapJourney() && context.mounted) {
+          await showCommonDialog(
+            context,
+            context.tr(
+              'import.import_fow_data.warning_for_import_multiple_data_md',
+            ),
+            markdown: true,
+          );
+        }
+        if (context.mounted) {
+          await _selectImportFile(context, ImportType.fow);
+        }
+        return;
+    }
   }
 }
 
@@ -524,8 +548,7 @@ class _AboutSettingsPageState extends State<AboutSettingsPage> {
       appBar: CapsuleStyleAppBar(
         title: context.tr('settings.categories.about.title'),
       ),
-      body: MlSingleChildScrollView(
-        padding: const EdgeInsets.all(8),
+      body: SettingsPageLayout(
         children: [
           SettingsSection(
             title: context.tr('settings.about'),

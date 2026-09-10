@@ -101,7 +101,8 @@
     "delete_journey_title": "删除旅程",
     "delete_journey_message": "确认删除该旅程记录?",
     "stop_ongoing_journey": "在此操作之前，请先停止当前正在进行的旅程。",
-    "delete_all_journey_message": "这将删除此应用中的所有行程，您确定吗？",
+    "delete_all_title": "删除所有旅程",
+    "delete_all_journey_message": "这将删除此应用中的所有旅程，您确定吗？",
     "journey_info_page_title": "旅程信息",
     "journey_info_edit_page_title": "编辑旅程信息",
     "import_mldx_data": "导入 MLDX 数据",
@@ -307,7 +308,10 @@
       "delete_backup_data": "删除备份数据"
     },
     "import_data": {
-      "title": "导入数据"
+      "title": "导入数据",
+      "mldx_desc": "用于恢复备份或迁移迹忆数据",
+      "vector_desc": "支持 GPX、KML 和 CSV 轨迹文件",
+      "fog_of_world_desc": "支持 ZIP 和 FWSS 数据"
     },
     "export_data": {
       "export_all": "导出所有数据",
@@ -344,12 +348,14 @@
     },
     "groups": {
       "recording_protection": "录制保护",
+      "usage_settings": "使用设置",
+      "data_system": "数据与系统",
       "appearance": "界面外观",
       "map_display": "地图显示",
       "region": "地区",
-      "data_exchange": "数据交换",
+      "import_export": "导入与导出",
       "data_maintenance": "数据维护",
-      "danger_zone": "危险操作",
+      "delete_data": "删除数据",
       "diagnostics": "诊断",
       "recovery": "恢复"
     },
