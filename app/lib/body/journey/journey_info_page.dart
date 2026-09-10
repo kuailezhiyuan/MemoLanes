@@ -4,6 +4,7 @@ import 'package:memolanes/common/component/app_button.dart';
 import 'package:memolanes/body/journey/compact_journey_info_card.dart';
 import 'package:memolanes/body/journey/journey_export.dart';
 import 'package:memolanes/body/journey/journey_info_edit_page.dart';
+import 'package:memolanes/body/journey/journey_raw_data_export.dart';
 import 'package:memolanes/body/journey/journey_track_edit_page.dart';
 import 'package:memolanes/common/component/basic_dialog_card.dart';
 import 'package:memolanes/common/component/app_option_tile.dart';
@@ -47,6 +48,7 @@ class _JourneyInfoPage extends State<JourneyInfoPage> {
   late JourneyHeader _journeyHeader;
   api.MapRendererProxy? _mapRendererProxy;
   MapBounds? _initialMapBounds;
+  bool _hasRawData = false;
 
   @override
   void initState() {
@@ -93,6 +95,9 @@ class _JourneyInfoPage extends State<JourneyInfoPage> {
         .where((j) => j.id == _journeyHeader.id)
         .cast<JourneyHeader?>()
         .firstOrNull;
+    final hasRawData = await api.journeyHasRawData(
+      journeyId: _journeyHeader.id,
+    );
 
     if (!mounted) return;
     setState(() {
@@ -101,6 +106,7 @@ class _JourneyInfoPage extends State<JourneyInfoPage> {
       if (latestHeader != null) {
         _journeyHeader = latestHeader;
       }
+      _hasRawData = hasRawData;
     });
   }
 
@@ -170,6 +176,65 @@ class _JourneyInfoPage extends State<JourneyInfoPage> {
 
   Future<void> _export() async {
     await showJourneyExportPicker(context, _journeyHeader);
+  }
+
+  Future<void> _deleteRawData(BuildContext context) async {
+    final confirmed = await showCommonDialog(
+      context,
+      context.tr('journey.delete_raw_data_message'),
+      hasCancel: true,
+      title: context.tr('journey.delete_raw_data_title'),
+      confirmButtonText: context.tr('common.delete'),
+      confirmVariant: AppButtonVariant.danger,
+    );
+    if (!confirmed || !context.mounted) return;
+
+    await showLoadingDialog(
+      asyncTask: api.deleteJourneyRawData(journeyId: _journeyHeader.id),
+    );
+    if (!context.mounted) return;
+
+    setState(() {
+      _hasRawData = false;
+    });
+  }
+
+  Widget _buildRawDataMoreMenu(BuildContext pageContext) {
+    return Builder(
+      builder: (menuContext) => ConstrainedBox(
+        constraints: const BoxConstraints(minWidth: 140),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(menuContext).pop();
+                showJourneyRawDataExportPicker(pageContext, _journeyHeader);
+              },
+              style: TextButton.styleFrom(
+                foregroundColor: Colors.white,
+                alignment: Alignment.centerLeft,
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+              ),
+              child: Text(pageContext.tr('journey.export_raw_data')),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.of(menuContext).pop();
+                _deleteRawData(pageContext);
+              },
+              style: TextButton.styleFrom(
+                foregroundColor: Colors.white,
+                alignment: Alignment.centerLeft,
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+              ),
+              child: Text(pageContext.tr('journey.delete_raw_data')),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -332,6 +397,10 @@ class _JourneyInfoPage extends State<JourneyInfoPage> {
           ),
           CapsuleStyleOverlayAppBar.overlayBar(
             title: context.tr("journey.journey_info_page_title"),
+            moreIcon: _hasRawData ? const Icon(Icons.raw_on, size: 22) : null,
+            moreMenuContent: _hasRawData
+                ? _buildRawDataMoreMenu(context)
+                : null,
           ),
         ],
       ),

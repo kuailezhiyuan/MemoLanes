@@ -36,7 +36,8 @@ enum CommonExportFormat {
   mldx,
   fwss,
   kml,
-  gpx;
+  gpx,
+  rawDataCsv;
 
   CommonExportOption get option {
     return switch (this) {
@@ -65,6 +66,13 @@ enum CommonExportFormat {
         title: tr('data.export_data.format_gpx'),
         description: tr('data.export_data.format_gpx_desc'),
       ),
+      CommonExportFormat.rawDataCsv => CommonExportOption(
+        extension: 'csv',
+        icon: Icons.table_chart_outlined,
+        title: tr('journey.export_raw_data_csv'),
+        description: tr('journey.export_raw_data_csv_desc'),
+        keepsCompleteData: true,
+      ),
     };
   }
 
@@ -88,6 +96,7 @@ Future<void> showCommonExportWithFormatPicker({
   required List<CommonExportFormat> formats,
   required CommonExportFileBuilder exportFile,
   CommonExportFormat? defaultFormat,
+  String? lossyFormatWarning,
   bool deleteFile = true,
 }) async {
   assert(formats.isNotEmpty);
@@ -105,6 +114,7 @@ Future<void> showCommonExportWithFormatPicker({
       title: title,
       formats: formats,
       initialFormat: initialFormat,
+      lossyFormatWarning: lossyFormatWarning,
     ),
   );
 
@@ -230,11 +240,13 @@ class _ExportFormatDialog extends StatefulWidget {
     required this.title,
     required this.formats,
     required this.initialFormat,
+    this.lossyFormatWarning,
   });
 
   final String title;
   final List<CommonExportFormat> formats;
   final CommonExportFormat initialFormat;
+  final String? lossyFormatWarning;
 
   @override
   State<_ExportFormatDialog> createState() => _ExportFormatDialogState();
@@ -298,7 +310,8 @@ class _ExportFormatDialogState extends State<_ExportFormatDialog> {
           const SizedBox(width: 8.0),
           Expanded(
             child: Text(
-              context.tr('data.export_data.lossy_format_warning'),
+              widget.lossyFormatWarning ??
+                  context.tr('data.export_data.lossy_format_warning'),
               style: AppTypography.supporting,
             ),
           ),

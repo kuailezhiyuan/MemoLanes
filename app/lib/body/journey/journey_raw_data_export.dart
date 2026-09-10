@@ -7,7 +7,7 @@ import 'package:memolanes/src/rust/journey_header.dart';
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 
-Future<CommonExportResult> _generateJourneyExport(
+Future<CommonExportResult> _generateJourneyRawDataExport(
   JourneyHeader journey,
   CommonExportFormat format,
 ) async {
@@ -15,40 +15,36 @@ Future<CommonExportResult> _generateJourneyExport(
   final date = journey.journeyDate.toSimpleDate().toString();
   final outputPath = path.join(
     temporaryDirectory.path,
-    '$date-${journey.revision}.${format.extension}',
+    '$date-${journey.revision}-raw.${format.extension}',
   );
   final exportType = switch (format) {
-    CommonExportFormat.mldx => api.ExportType.mldx,
-    CommonExportFormat.fwss => api.ExportType.fwss,
-    CommonExportFormat.gpx => api.ExportType.gpx,
-    CommonExportFormat.kml => api.ExportType.kml,
-    CommonExportFormat.rawDataCsv => throw UnsupportedError(
-      'Unsupported journey export format: $format',
-    ),
+    CommonExportFormat.rawDataCsv => api.RawDataExportType.csv,
+    CommonExportFormat.gpx => api.RawDataExportType.gpx,
+    CommonExportFormat.kml => api.RawDataExportType.kml,
+    CommonExportFormat.mldx || CommonExportFormat.fwss =>
+      throw UnsupportedError('Unsupported raw-data export format: $format'),
   };
-  final result = await api.exportJourney(
+  final result = await api.exportJourneyRawData(
     targetFilepath: outputPath,
     journeyId: journey.id,
     exportType: exportType,
-    includeRawData: false,
   );
   return CommonExportResult.create(result, outputPath);
 }
 
-Future<void> showJourneyExportPicker(
+Future<void> showJourneyRawDataExportPicker(
   BuildContext context,
   JourneyHeader journey,
 ) async {
-  final supportsVector = journey.journeyType != JourneyType.bitmap;
   await showCommonExportWithFormatPicker(
     context: context,
-    title: context.tr('data.export_data.export_journey_title'),
-    formats: [
-      CommonExportFormat.mldx,
-      CommonExportFormat.fwss,
-      if (supportsVector) CommonExportFormat.kml,
-      if (supportsVector) CommonExportFormat.gpx,
+    title: context.tr('journey.export_raw_data'),
+    formats: const [
+      CommonExportFormat.rawDataCsv,
+      CommonExportFormat.gpx,
+      CommonExportFormat.kml,
     ],
-    exportFile: (format) => _generateJourneyExport(journey, format),
+    exportFile: (format) => _generateJourneyRawDataExport(journey, format),
+    lossyFormatWarning: context.tr('journey.raw_data_lossy_format_warning'),
   );
 }

@@ -238,7 +238,8 @@ class _SettingsBodyState extends State<SettingsBody> {
                     targetFilepath: filepath,
                   ),
                   CommonExportFormat.kml ||
-                  CommonExportFormat.gpx => throw UnsupportedError(
+                  CommonExportFormat.gpx ||
+                  CommonExportFormat.rawDataCsv => throw UnsupportedError(
                     'Unsupported export format: $format',
                   ),
                 };
