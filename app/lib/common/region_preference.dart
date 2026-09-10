@@ -54,15 +54,19 @@ class WorldviewManager {
     achievement.Worldview worldview, {
     required bool persist,
   }) async {
-    final data = await rootBundle.load(worldview.assetPath);
-    await achievement.initOrChangeGeoData(
-      worldview: worldview,
-      geoData: data.buffer.asUint8List(),
-    );
+    await _activateGeoData(worldview);
     if (persist) {
       MMKVUtil.putString(MMKVKey.worldviewPreference, worldview.id);
     }
     _currentWorldview = worldview;
+  }
+
+  Future<void> _activateGeoData(achievement.Worldview worldview) async {
+    await achievement.activateGeoData(
+      worldview: worldview,
+      loadAsset: () async =>
+          (await rootBundle.load(worldview.assetPath)).buffer.asUint8List(),
+    );
   }
 
   achievement.Worldview? _loadSavedWorldview() {
