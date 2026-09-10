@@ -54,15 +54,19 @@ class WorldviewManager {
     achievement.Worldview worldview, {
     required bool persist,
   }) async {
-    final data = await rootBundle.load(worldview.assetPath);
-    await achievement.initOrChangeGeoData(
-      worldview: worldview,
-      geoData: data.buffer.asUint8List(),
-    );
+    await _activateGeoData(worldview);
     if (persist) {
       MMKVUtil.putString(MMKVKey.worldviewPreference, worldview.id);
     }
     _currentWorldview = worldview;
+  }
+
+  Future<void> _activateGeoData(achievement.Worldview worldview) async {
+    await achievement.activateGeoData(
+      worldview: worldview,
+      loadAsset: () async =>
+          (await rootBundle.load(worldview.assetPath)).buffer.asUint8List(),
+    );
   }
 
   achievement.Worldview? _loadSavedWorldview() {
@@ -109,7 +113,7 @@ Future<achievement.Worldview?> showWorldviewPicker(
 }) {
   return showSetupCard<achievement.Worldview>(
     context,
-    child: _RegionPickerSheet(selectedWorldview: selectedWorldview),
+    builder: (_) => _RegionPickerSheet(selectedWorldview: selectedWorldview),
   );
 }
 
@@ -120,7 +124,7 @@ class _RegionPickerSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SetupBottomSheet(
+    return SetupDialogCard(
       title: context.tr("privacy.region_title"),
       maxHeightFactor: 0.55,
       contentPadding: const EdgeInsets.fromLTRB(20, 14, 20, 10),

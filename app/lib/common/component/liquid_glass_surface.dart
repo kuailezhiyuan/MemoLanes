@@ -64,7 +64,11 @@ class LiquidGlassSurface extends StatelessWidget {
   }
 
   Widget _clip(Widget child) {
-    if (circular) return ClipOval(child: child);
+    // iOS platform-view backdrop blur supports RRect clips, but ignores the
+    // path clip produced by ClipOval, leaving a rectangular blur over the map.
+    if (circular) {
+      return ClipRRect(clipper: const _CircleRRectClipper(), child: child);
+    }
     return ClipRRect(borderRadius: borderRadius, child: child);
   }
 
@@ -148,25 +152,6 @@ class LiquidGlassSurface extends StatelessWidget {
                     ),
                   ),
                 ),
-              Positioned(
-                left: circular ? 10 : 14,
-                right: circular ? 10 : 14,
-                top: 1,
-                height: 1.2,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      colors: [
-                        StyleConstants.glassHighlightColor.withValues(alpha: 0),
-                        StyleConstants.glassHighlightColor.withValues(
-                          alpha: StyleConstants.isDarkMode ? 0.32 : 0.88,
-                        ),
-                        StyleConstants.glassHighlightColor.withValues(alpha: 0),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
               if (padding == null)
                 child
               else
@@ -177,4 +162,20 @@ class LiquidGlassSurface extends StatelessWidget {
       ),
     );
   }
+}
+
+class _CircleRRectClipper extends CustomClipper<RRect> {
+  const _CircleRRectClipper();
+
+  @override
+  RRect getClip(Size size) {
+    final radius = size.shortestSide / 2;
+    return RRect.fromRectAndRadius(
+      Rect.fromCircle(center: size.center(Offset.zero), radius: radius),
+      Radius.circular(radius),
+    );
+  }
+
+  @override
+  bool shouldReclip(_CircleRRectClipper oldClipper) => false;
 }
