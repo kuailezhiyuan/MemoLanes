@@ -7,7 +7,7 @@
  */
 
 export interface MapLocale {
-  /** Protomaps `name:*` suffix, for example `fr` or `zh-Hant`. */
+  /** Map label language suffix, for example `fr` or `zh-Hant`. */
   readonly language: string;
   /** Protomaps script names treated as local for this language. */
   readonly targetScripts: readonly string[];

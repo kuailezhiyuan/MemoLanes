@@ -54,6 +54,7 @@ export interface ExternalParams {
   fit_padding_bottom?: string | number;
   fit_padding_left?: string | number;
   render?: string;
+  /** Remote style URL or `pastel` for the bundled OpenFreeMap style. */
   map_style?: string;
   /** Fog palette ID owned and validated by the map renderer. */
   fog_style?: string;

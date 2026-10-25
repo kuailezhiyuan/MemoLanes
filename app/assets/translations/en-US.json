@@ -304,6 +304,7 @@
       },
       "style_name": {
         "maplibre": "MapLibre Demo Tile",
+        "pastel": "Pastel",
         "openfreemap": "OpenFreeMap"
       }
     },

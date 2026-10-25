@@ -59,11 +59,24 @@ All parameters are optional except `cgi_endpoint` which is required.
 | `lat` | Initial latitude | number | 0 |
 | `zoom` | Initial zoom level | number | 2 |
 | `render` | Render method | `'canvas'` | `'canvas'` |
-| `map_style` | Map style URL | string | OpenFreeMap Liberty |
+| `map_style` | Map style URL, or `pastel` for the bundled Pastel style | string | OpenFreeMap Liberty |
 | `fog_style` | Fog palette ID (`dark` or `light`) | string | `dark` |
 | `fog_density` | Fog density (0-1) | number | Style default (0.5 dark, 0.6 light) |
 | `projection` | Map projection | `'mercator'` \| `'globe'` | `'globe'` |
 | `debug` | Show debug panel | `'true'` \| `'false'` | `'false'` |
+
+### Pastel style
+
+Select **Pastel** (**淡彩** in Chinese) in the app's map settings, or set
+`map_style=pastel` in the WebView parameters. The style is based on OpenFreeMap
+Positron with warm white land, pale cyan water, translucent vegetation,
+blue-gray roads and a zoom-dependent label hierarchy. Named-road labels replace
+route shields, place names follow the browser's map language, and buildings
+appear at zoom 16. It uses OpenFreeMap tiles and fonts without an API key.
+
+The style JSON is bundled into JavaScript so it also loads in file-based
+WebViews. Its [source and license](static/styles/README.md) are kept alongside
+the style; webpack includes the upstream license in the distributed assets.
 
 ## Web Development
 

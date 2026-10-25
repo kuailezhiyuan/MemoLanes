@@ -21,6 +21,10 @@ module.exports = (env, argv) => {
     new CopyWebpackPlugin({
       patterns: [
         {
+          from: path.resolve(__dirname, "static/styles/pastel.LICENSE.txt"),
+          to: "pastel.LICENSE.txt",
+        },
+        {
           from: path.resolve(
             __dirname,
             "node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs",

@@ -15,6 +15,7 @@ import type {
   MapContextEvent,
   RequestTransformFunction,
   ResourceType,
+  StyleSpecification,
 } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import {
@@ -26,6 +27,7 @@ import { JourneyTileProvider } from "./journey-tile-provider";
 import { getFogStyle } from "./fog-style";
 import { detectMapLocale, type MapLocale } from "./map-locale";
 import { transformStyleWithProjection } from "./utils";
+import pastelStyle from "./styles/pastel.json";
 import { JOURNEY_LAYER_ID } from "./layers/journey-layer-interface";
 import type { JourneyLayer } from "./layers/journey-layer-interface";
 import { MAX_MAP_ZOOM } from "./layer-config";
@@ -489,7 +491,13 @@ export class MapController {
    * Apply the map style with projection transform
    */
   private applyMapStyle(): void {
-    this.map.setStyle(this.params.mapStyle, {
+    // Bundle the custom style so file-based WebViews need no local JSON fetch.
+    // Give each style load its own object, including context recovery/retries.
+    const style =
+      this.params.mapStyle === "pastel"
+        ? (JSON.parse(JSON.stringify(pastelStyle)) as StyleSpecification)
+        : this.params.mapStyle;
+    this.map.setStyle(style, {
       transformStyle: (_previousStyle: any, nextStyle: any) =>
         transformStyleWithProjection(
           nextStyle,

@@ -304,6 +304,7 @@
       },
       "style_name": {
         "maplibre": "MapLibre 演示瓦片",
+        "pastel": "淡彩",
         "openfreemap": "OpenFreeMap"
       }
     },
